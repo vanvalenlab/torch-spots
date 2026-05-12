@@ -1,0 +1,5 @@
+.venv/
+**/__pycache__
+deepcell_spots_tf/
+data/
+_auth.py
