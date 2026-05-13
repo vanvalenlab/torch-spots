@@ -58,7 +58,7 @@ def train(
             optimizer.zero_grad()
 
             outputs = model(image)
-            curr_loss = loss(labels, outputs) 
+            curr_loss = loss(outputs, labels) 
 
             train_loss.update(curr_loss, batch_size=batch_size)  
 

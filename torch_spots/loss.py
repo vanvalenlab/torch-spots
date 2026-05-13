@@ -55,7 +55,7 @@ def weighted_categorical_crossentropy(y_true, y_pred, n_classes=2, eps=1e-7):
     weights = weights.view(1, -1, 1, 1)
 
     # Cross-entropy per pixel: sum over C, shape: (B, H, W)
-    ce = -(weights * y_true * torch.log(y_pred))
+    ce = -(weights * y_true * torch.log(y_pred)).sum(-1)
     return ce
 
 
