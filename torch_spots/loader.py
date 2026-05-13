@@ -1,7 +1,4 @@
 """Spot detection image datasets and DataLoaders (PyTorch)"""
-
-from __future__ import absolute_import, division, print_function
-
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader

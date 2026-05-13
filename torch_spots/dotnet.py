@@ -169,7 +169,7 @@ class SpotNet(nn.Module):
                  n_dense_filters:         int = 128,
                  num_classes:             int = 2,
                  regression_feature_size: int = 256,
-                 norm_method:             str = 'std'):
+                 norm_method:             str = None):
         super().__init__()
 
         # ---- Backbone ----

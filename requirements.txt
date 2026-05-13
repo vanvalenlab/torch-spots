@@ -3,3 +3,4 @@ torchvision
 ipython
 matplotlib
 scipy
+pyro-ppl
