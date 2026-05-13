@@ -2,6 +2,7 @@ import torch
 import os
 import datetime
 import zarr
+import json
 
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
@@ -144,26 +145,31 @@ def main():
         'model_path': "data/model/",
         'data_path': Path.home() / '.deepcell/spotnet/',
         'run_info': 'data/logs/',
-        'epochs': 30,
+        'epochs': 20,
         'batch_size': 10,
-        'lr': 1e-2,
+        'lr': 1e-3,
         'num_workers': 4,
         'write': True,
         'device': 'cuda:2',
     }
+    
+    config['data_path'] = str(config['data_path'])
 
     curr_time = f"{datetime.datetime.now():%Y%m%d%H%M%S}"
 
     z_train = zarr.open(f"{config['data_path']}/train.zarr")
     z_val = zarr.open(f"{config['data_path']}/val.zarr")
 
-    run_info = config['run_info'] + '/' + 'current'
-    model_path = config['model_path'] + '/' + 'current'
+    run_info = config['run_info'] + '/' + curr_time
+    model_path = config['model_path'] + '/' + curr_time
     
     if not os.path.isdir(run_info):
         os.makedirs(run_info, exist_ok=True)
     if not os.path.isdir(model_path) and config['write']:
         os.makedirs(model_path, exist_ok=True)
+
+    with open(model_path + '/' + 'training_config.json', 'w') as file:
+        json.dump(config, file)
 
     writer = SummaryWriter(run_info)
     
