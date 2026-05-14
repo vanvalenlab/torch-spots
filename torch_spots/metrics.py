@@ -169,13 +169,13 @@ class PointMetrics:
         true_pts: np.ndarray,
         inferred_pts: np.ndarray,
     ) -> None:
+        
+        self.M = len(true_pts)
+        self.N = len(inferred_pts)
+
         self.true_pts = np.asarray(true_pts, dtype=float)
         self.inferred_pts = np.asarray(inferred_pts, dtype=float)
 
-        if self.true_pts.ndim != 2 or self.true_pts.shape[1] != 2:
-            raise ValueError(f"true_pts must be shape (M, 2), got {self.true_pts.shape}")
-        if self.inferred_pts.ndim != 2 or self.inferred_pts.shape[1] != 2:
-            raise ValueError(f"inferred_pts must be shape (N, 2), got {self.inferred_pts.shape}")
 
         # Pre-compute the full pairwise distance matrix (M × N) once
         self._dist_matrix: Optional[np.ndarray] = None
@@ -236,15 +236,13 @@ class PointMetrics:
         -------
         PointMetricsResult
         """
-        M = len(self.true_pts)
-        N = len(self.inferred_pts)
 
         # --- Handle degenerate cases ----------------------------------------
-        if M == 0 and N == 0:
+        if self.M == 0 and self.N == 0:
             return self._empty_result(threshold)
-        if M == 0:
+        if self.M == 0:
             return PointMetricsResult(
-                threshold=threshold, TP=0, FP=N, FN=0,
+                threshold=threshold, TP=0, FP=self.N, FN=0,
                 precision=0.0, recall=0.0, f1=0.0,
                 mean_dist=0.0, median_dist=0.0, rmse=0.0,
                 p95_dist=0.0, max_dist=0.0, bias_x=0.0, bias_y=0.0,
@@ -253,11 +251,11 @@ class PointMetrics:
                 matched_inferred_idx=np.array([], int),
                 matched_distances=np.array([], float),
                 unmatched_true_idx=np.array([], int),
-                unmatched_inferred_idx=np.arange(N),
+                unmatched_inferred_idx=np.arange(self.N),
             )
-        if N == 0:
+        if self.N == 0:
             return PointMetricsResult(
-                threshold=threshold, TP=0, FP=0, FN=M,
+                threshold=threshold, TP=0, FP=0, FN=self.M,
                 precision=0.0, recall=0.0, f1=0.0,
                 mean_dist=0.0, median_dist=0.0, rmse=0.0,
                 p95_dist=0.0, max_dist=0.0, bias_x=0.0, bias_y=0.0,
@@ -265,7 +263,7 @@ class PointMetrics:
                 matched_true_idx=np.array([], int),
                 matched_inferred_idx=np.array([], int),
                 matched_distances=np.array([], float),
-                unmatched_true_idx=np.arange(M),
+                unmatched_true_idx=np.arange(self.M),
                 unmatched_inferred_idx=np.array([], int),
             )
 
@@ -280,17 +278,17 @@ class PointMetrics:
         TP = int(valid_mask.sum())
 
         # Unmatched true  → FN
-        unmatched_true_set  = set(range(M)) - set(tp_true_idx.tolist())
+        unmatched_true_set  = set(range(self.M)) - set(tp_true_idx.tolist())
         # Over-threshold pairs also contribute their true side to FN
         over_true  = set(row_ind[~valid_mask].tolist())
         over_infer = set(col_ind[~valid_mask].tolist())
         # Points not considered by the rectangular matching at all
-        extra_true  = set(range(M))  - set(row_ind.tolist())
-        extra_infer = set(range(N))  - set(col_ind.tolist())
+        extra_true  = set(range(self.M))  - set(row_ind.tolist())
+        extra_infer = set(range(self.N))  - set(col_ind.tolist())
 
         fn_indices = np.array(sorted(unmatched_true_set | over_true | extra_true), dtype=int)
         fp_indices = np.array(sorted(
-            (set(range(N)) - set(tp_infer_idx.tolist())) | extra_infer
+            (set(range(self.N)) - set(tp_infer_idx.tolist())) | extra_infer
         ), dtype=int)
 
         FN = len(fn_indices)

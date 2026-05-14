@@ -14,13 +14,13 @@ import pandas as pd
 @click.command()
 @click.option(
     '--device', 
-    default='cpu', 
+    default='cuda:0', 
     help="""The device that you want to run the inference on. 
             Can be `'cpu'` or `'cuda'`. If `'cuda'`, can also specify the specific GPU if multiple are available.""")
 
 @click.option(
     '--model-path', 
-    default= Path.home() / ".deepcell/models/mesmer/saved_model_best_dict.pth", 
+    default= "data/model/20260513091742/saved_model_best_dict.pth", 
     help="""Path to model. 
             If unset, will use default DeepCell location (`~/.deepcell/models/mesmer/saved_model_best_dict.pth`)"""
             )
@@ -35,6 +35,10 @@ import pandas as pd
 def main(device: str,
          model_path: str,
          data_path: str):
+    
+    sweep = {
+        
+    }
         
     z_test = zarr.open(data_path)
 
