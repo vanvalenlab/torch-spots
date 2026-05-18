@@ -3,7 +3,6 @@ import os
 import zarr
 import glob
 import numpy as np
-import pandas as pd
 
 def convert_to_zarr(filename, out_dir=None):
 
