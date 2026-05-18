@@ -1,14 +1,12 @@
 import numpy as np
 import torch
 
-from dotnet import SpotNet
+from .dotnet import SpotNet
 from skimage.feature import peak_local_max
 
 import numpy as np
 
-from utils import spotnet_preprocess
-
-from utils import tile_input
+from .utils import spotnet_preprocess, tile_input
 
 
 class SpotDetection():
@@ -67,9 +65,9 @@ class SpotDetection():
             for i, (y_ind, x_ind) in enumerate(dot_pixel_inds):
                 dot_temp[i, 0] = y_ind + delta_y[y_ind, x_ind]
                 dot_temp[i, 1] = x_ind + delta_x[y_ind, x_ind]
-            dot_centers.append(dot_temp)
+            dot_centers.append(dot_temp.squeeze())
 
-        return np.array(dot_centers)
+        return dot_centers
     
     def _minmax(self,x):
 
@@ -161,4 +159,4 @@ class SpotDetection():
             curr_points = self._y_annotations_to_point_list_max(transforms, threshold=threshold, min_distance=min_distance)
             points.append(curr_points)        
 
-        return np.array(points).squeeze()
+        return points

@@ -7,7 +7,7 @@ import pandas as pd
 from scipy.spatial import distance
 from tqdm import tqdm
 
-from decoding_utils import decoding_function
+from .decoding_utils import decoding_function
 
 
 class SpotDecoding:

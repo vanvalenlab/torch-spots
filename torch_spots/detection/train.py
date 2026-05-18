@@ -9,9 +9,9 @@ from torch.utils.tensorboard import SummaryWriter
 
 from pathlib import Path
 
-from dotnet import SpotNet
-from loss import DotNetLosses, LossTracker
-from loader import spot_dataloader
+from .dotnet import SpotNet
+from .loss import DotNetLosses, LossTracker
+from .loader import spot_dataloader
 
 def train(
         trainloader,
