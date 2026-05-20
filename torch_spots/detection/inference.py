@@ -29,6 +29,55 @@ class SpotDetection():
         self.model.load_state_dict(checkpoint)
         self.model = self.model.eval().to(self.device)
 
+    def _y_annotations_to_point_list_max_offsets(
+            self, 
+            y_pred, 
+            threshold=0.95, 
+            min_distance=2, 
+            x_offsets=0, 
+            y_offsets=0
+    ):
+        """Convert raw prediction to a predicted point list using
+        ``skimage.feature.peak_local_max`` to determine local maxima in classification
+        prediction image, and their corresponding regression values will be used to
+        create a final spot position prediction which will be added to the output spot
+        center coordinates list.
+
+        Args:
+            y_pred (array): a dictionary of predictions with keys `'classification'` and
+                `'offset_regression'` corresponding to the named outputs of the
+                ``dot_net_2D model``.
+            threshold (float): a number in ``[0, 1]``. Pixels with classification
+                score > `threshold` are considered as containing a spot center.
+            min_distance (float): the minimum distance between detected spots in pixels.
+
+        Returns:
+            array: spot center coordinates of the format [[y0, x0], [y1, x1],...]
+        """
+        if not isinstance(y_pred, dict):
+            raise TypeError('Input predictions must be a dictionary.')
+
+        dot_centers = []
+
+        for ind in range(np.shape(y_pred['detections'])[0]):
+            # iterate through individual images in this batch
+
+            dot_pixel_inds = peak_local_max(y_pred['detections'][ind, 1],
+                                            min_distance=min_distance,
+                                            threshold_abs=threshold)
+
+            delta_y = y_pred['offsets'][ind,0]
+            delta_x = y_pred['offsets'][ind,1]
+
+            dot_temp = np.zeros_like(dot_pixel_inds)
+
+            for i, (y_ind, x_ind) in enumerate(dot_pixel_inds):
+                dot_temp[i, 0] = y_ind + delta_y[y_ind, x_ind] + y_offsets[ind]
+                dot_temp[i, 1] = x_ind + delta_x[y_ind, x_ind] + x_offsets[ind]
+            dot_centers.append(dot_temp)
+
+        return np.vstack(dot_centers)
+
 
     def _y_annotations_to_point_list_max(self, y_pred, threshold=0.95, min_distance=2):
         """Convert raw prediction to a predicted point list using
@@ -52,7 +101,10 @@ class SpotDetection():
             raise TypeError('Input predictions must be a dictionary.')
 
         dot_centers = []
+
         for ind in range(np.shape(y_pred['detections'])[0]):
+            # iterate through individual images in this batch
+
             dot_pixel_inds = peak_local_max(y_pred['detections'][ind, 1],
                                             min_distance=min_distance,
                                             threshold_abs=threshold)
@@ -65,9 +117,9 @@ class SpotDetection():
             for i, (y_ind, x_ind) in enumerate(dot_pixel_inds):
                 dot_temp[i, 0] = y_ind + delta_y[y_ind, x_ind]
                 dot_temp[i, 1] = x_ind + delta_x[y_ind, x_ind]
-            dot_centers.append(dot_temp.squeeze())
+            dot_centers.append(dot_temp)
 
-        return dot_centers
+        return np.vstack(dot_centers)
     
     def _minmax(self,x):
 
@@ -136,15 +188,20 @@ class SpotDetection():
 
         # Preprocess
         X = spotnet_preprocess(X)
-        tiles, _ = tile_input(X, (128,128))
+        tiles, tile_info = tile_input(X, (128,128))
+
+        # Get the point offsets for each tile
+        x_offset = np.array(tile_info['y_starts'])
+        y_offset = np.array(tile_info['x_starts'])
+
 
         # Send data to device
-        X = torch.tensor(X, device=self.device)
+        X = torch.tensor(tiles, device=self.device)
 
         batches = torch.split(X, batch_size)
 
         points = []
-
+        counter = 0
         for batch in batches:
 
             # Infer
@@ -154,9 +211,17 @@ class SpotDetection():
             for k,v in transforms.items():
                 transforms[k] = v.cpu().numpy()
 
-            # Postprocess
+            # Postprocess with offsets
+            curr_x_offset = x_offset[counter:counter+batch.shape[0]]
+            curr_y_offset = y_offset[counter:counter+batch.shape[0]]
 
-            curr_points = self._y_annotations_to_point_list_max(transforms, threshold=threshold, min_distance=min_distance)
-            points.append(curr_points)        
+            curr_points = self._y_annotations_to_point_list_max_offsets(
+                transforms, threshold=threshold, min_distance=min_distance,
+                x_offsets=curr_x_offset, y_offsets=curr_y_offset
+            )
+            points.append(curr_points)
+            counter+=batch.shape[0]
+
+        points = np.vstack(points)        
 
         return points
