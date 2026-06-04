@@ -336,10 +336,6 @@ def decoding_function(spots,
             parameters.
     """
     # if cuda available, runs on gpu
-    if torch.cuda.is_available():
-        torch.set_default_tensor_type('torch.cuda.FloatTensor')
-    else:
-        torch.set_default_tensor_type("torch.FloatTensor")
 
     valid_distributions = ['Relaxed Bernoulli', 'Bernoulli', 'Gaussian']
     if distribution not in valid_distributions:
@@ -381,9 +377,6 @@ def decoding_function(spots,
 
     class_probs_star = rb_e_step(
         data, codes, w_star, temperature_star, sigma_star, c, r, params_mode)
-
-    if torch.cuda.is_available():
-        torch.set_default_tensor_type("torch.FloatTensor")
 
     torch_params = {
         'w_star': w_star.cpu(),

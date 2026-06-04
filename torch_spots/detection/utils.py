@@ -145,7 +145,7 @@ def max_cp_array_to_point_list_max(max_cp_array, threshold=0.95, min_distance=2)
                                         threshold_abs=threshold)
         dot_centers.append(dot_pixel_inds)
 
-    return np.array(dot_centers)
+    return np.vstack(dot_centers)
 
 
 def y_annotations_to_point_list_cc(y_pred, threshold=0.95):
@@ -211,30 +211,25 @@ def extract_spots_prob_from_coords_maxpool(image, spots_locations, extra_pixel_n
                 extra_pixel_num
             )
         )
-
+        
     spots_intensities = []
     for idx_batch in range(len(image)):
-        image_slice = image[idx_batch]
-        coords = spots_locations[idx_batch]
+        image_slice = image[idx_batch]  # [channel, H, W]
 
-        num_spots = len(coords)
-        img_boundary_x = image_slice.shape[0] - 1
-        img_boundary_y = image_slice.shape[1] - 1
+        num_spots = spots_locations.shape[0]
+        img_boundary_x = image_slice.shape[1] - 1  # H
+        img_boundary_y = image_slice.shape[2] - 1  # W
 
-        intensity_d = np.zeros(((extra_pixel_num * 2 + 1) ** 2, num_spots, image_slice.shape[-1]))
+        intensity_d = np.zeros(((extra_pixel_num * 2 + 1) ** 2, num_spots, image_slice.shape[0]))  # channels first
         d = -1
         for dx in np.arange(-extra_pixel_num, extra_pixel_num + 1):
             for dy in np.arange(-extra_pixel_num, extra_pixel_num + 1):
-                d = d + 1
-                for ind_cr in range(image_slice.shape[-1]):
-                    x_coord = np.maximum(
-                        0, np.minimum(img_boundary_x, np.around(coords[:, 0]) + dx)
-                    )  # (num_spots,)
-                    y_coord = np.maximum(
-                        0, np.minimum(img_boundary_y, np.around(coords[:, 1]) + dy)
-                    )  # (num_spots,)
+                d += 1
+                for ind_cr in range(image_slice.shape[0]):  # iterate over channels
+                    x_coord = np.maximum(0, np.minimum(img_boundary_x, np.around(spots_locations[:, 0]) + dx))
+                    y_coord = np.maximum(0, np.minimum(img_boundary_y, np.around(spots_locations[:, 1]) + dy))
 
-                    intensity_d[d, :, ind_cr] = image_slice[x_coord, y_coord, ind_cr]
+                    intensity_d[d, :, ind_cr] = image_slice[ind_cr, x_coord, y_coord]  # channel first indexing
 
         intensity = np.max(intensity_d, axis=0)
         spots_intensities.append(intensity)
@@ -536,7 +531,7 @@ def spotnet_preprocess(image):
     
     return output
 
-def tile_input(image, model_image_shape, pad_mode='constant'):
+def tile_input(image, model_image_shape, pad_mode='constant', stride_ratio = 1.0):
     """
     Tile the input image to match shape expected by model.
     Expects channels-first format: (B, C, H, W).
@@ -574,7 +569,7 @@ def tile_input(image, model_image_shape, pad_mode='constant'):
         tiles, tiles_info = tile_image(
             image,
             model_input_shape=model_image_shape,
-            stride_ratio=1.0,
+            stride_ratio=stride_ratio,
             pad_mode=pad_mode
         )
 

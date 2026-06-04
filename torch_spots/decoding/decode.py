@@ -1,5 +1,4 @@
 import numpy as np
-from skimage.feature import peak_local_max
 
 import numpy as np
 import pandas as pd
@@ -385,6 +384,10 @@ class SpotDecoding:
             dict: Dictionary with keys: `'spot_index'`, `'probability'`, `'predicted_id'`,
                 `'predicted_name'`, `'source'`.
         """
+
+        assert spots_intensities_vec.shape[-1] % self.channels == 0, "Make sure the shape is correct"
+        assert spots_intensities_vec.shape[-1] % self.rounds == 0, "Make sure the shape is correct"
+
         self._validate_spots_intensities(spots_intensities_vec)
 
         spots_intensities_reshaped = np.reshape(spots_intensities_vec,

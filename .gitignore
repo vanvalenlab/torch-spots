@@ -5,3 +5,5 @@ data/
 _auth.py
 **/*.ipynb
 SpotNetExampleData-v1_0/
+*.ims
+*.csv

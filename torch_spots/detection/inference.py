@@ -6,7 +6,8 @@ from skimage.feature import peak_local_max
 
 import numpy as np
 
-from .utils import spotnet_preprocess, tile_input
+from .utils import spotnet_preprocess, tile_input, untile_output, \
+      max_cp_array_to_point_list_max, extract_spots_prob_from_coords_maxpool
 
 
 class SpotDetection():
@@ -28,6 +29,7 @@ class SpotDetection():
         checkpoint = torch.load(self.model_path)
         self.model.load_state_dict(checkpoint)
         self.model = self.model.eval().to(self.device)
+        self.input_shape = 128
 
     def _y_annotations_to_point_list_max_offsets(
             self, 
@@ -77,6 +79,24 @@ class SpotDetection():
             dot_centers.append(dot_temp)
 
         return np.vstack(dot_centers)
+    
+    def get_spot_intensities(
+            self,
+            transforms,
+            threshold=0.9,
+            min_distance=1,
+            extra_pixel_num=0
+    ):
+        
+        spot_probs = transforms['detections'][:, 1:2] # Shape R, C, H, W
+        prob_mips = np.max(spot_probs, axis=0) # Shape C, H, W
+        
+        point_coord = max_cp_array_to_point_list_max(prob_mips, threshold=threshold, min_distance=min_distance)
+
+        intensities = extract_spots_prob_from_coords_maxpool(spot_probs, point_coord, extra_pixel_num=extra_pixel_num)        
+        intensities = np.concatenate(intensities, axis=1)
+
+        return intensities, point_coord
 
 
     def _y_annotations_to_point_list_max(self, y_pred, threshold=0.95, min_distance=2):
@@ -121,26 +141,44 @@ class SpotDetection():
 
         return np.vstack(dot_centers)
     
-    def _minmax(self,x):
+    def predict_transforms(
+            self,
+            X,
+            batch_size=20,
+        ):
+        
+        # Preprocess
+        X = spotnet_preprocess(X)
+        tiles, tile_info = tile_input(X, (self.input_shape,self.input_shape))
 
-        xmin = np.min(x, axis=(1,2,3), keepdims=True)
-        xmax = np.max(x, axis=(1,2,3), keepdims=True)
-        x = (x - xmin) / (xmax - xmin)
+        # Send data to device
+        X = torch.tensor(tiles, device=self.device)
 
-        return x
-    
-    def _perc_clip(self, x):
+        batches = torch.split(X, batch_size)
 
-        p1, p99 = np.percentile(x, (0.1, 99.9))
-        return np.clip(x, p1, p99, dtype=np.float32)
-    
-    def _standardize(self, x):
-        """Apply percentile clipping, min-max normalization, then subtraction at 0.5."""
-        x = self._perc_clip(x)
-        x = self._minmax(x)
-        x = x - 0.5
+        transforms = {
+            'offsets': [],
+            'detections': []
+        }
+        
+        for batch in batches:
 
-        return x
+            # Infer
+            with torch.inference_mode():
+                pred = self.model(batch)
+            
+
+            for k,v in pred.items():
+                transforms[k].append(v.cpu().numpy())
+
+        for k,v in transforms.items():
+            transforms[k] = np.concatenate(v)
+
+        for k,v in transforms.items():
+            transforms[k] = untile_output(v, tile_info)    
+
+        return transforms
+
     
     def _eval_predict(
             self,
@@ -155,7 +193,7 @@ class SpotDetection():
         """
 
         # Preprocess
-        X = self._standardize(X)
+        X = spotnet_preprocess(X)
 
         # Send data to device
         X = torch.tensor(X, device=self.device)
@@ -173,7 +211,7 @@ class SpotDetection():
         return points
         
 
-    def predict(
+    def predict_points(
             self,
             X,
             threshold=0.99,
@@ -188,7 +226,7 @@ class SpotDetection():
 
         # Preprocess
         X = spotnet_preprocess(X)
-        tiles, tile_info = tile_input(X, (128,128))
+        tiles, tile_info = tile_input(X, (self.input_shape,self.input_shape))
 
         # Get the point offsets for each tile
         x_offset = np.array(tile_info['y_starts'])
