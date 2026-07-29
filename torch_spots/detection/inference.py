@@ -1,12 +1,12 @@
 import numpy as np
 import torch
 
-from .dotnet import SpotNet
+from torch_spots.detection.dotnet import SpotNet
 from skimage.feature import peak_local_max
 
 import numpy as np
 
-from .utils import spotnet_preprocess, tile_input, untile_output, \
+from torch_spots.detection.utils import spotnet_preprocess, tile_input, untile_output, \
       max_cp_array_to_point_list_max, extract_spots_prob_from_coords_maxpool
 
 

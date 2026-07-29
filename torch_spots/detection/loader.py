@@ -4,7 +4,7 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from scipy.ndimage import distance_transform_edt
 
-from .augmentation import SpotAugmentation
+from torch_spots.detection.augmentation import SpotAugmentation
 
 
 def _one_hot_2d(contains_point):
