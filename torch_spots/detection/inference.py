@@ -5,6 +5,9 @@ from torch_spots.detection.dotnet import SpotNet
 from skimage.feature import peak_local_max
 
 import numpy as np
+import glob
+
+from pathlib import Path
 
 from torch_spots.detection.utils import spotnet_preprocess, tile_input, untile_output, \
       max_cp_array_to_point_list_max, extract_spots_prob_from_coords_maxpool
@@ -26,6 +29,17 @@ class SpotDetection():
         else:
             self.device = device
 
+        if model_path is None:
+            
+            from deepcell_auth import download_torch_spots_model
+            download_torch_spots_model()
+
+            canonical_path = Path.home() / ".deepcell/models"
+            # Use latest version
+            model_path = sorted(
+                glob.glob(str(canonical_path / "torch-spots*.pth"))
+            )[-1]
+        
         checkpoint = torch.load(self.model_path)
         self.model.load_state_dict(checkpoint)
         self.model = self.model.eval().to(self.device)
