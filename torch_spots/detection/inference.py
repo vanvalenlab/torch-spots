@@ -39,7 +39,7 @@ class SpotDetection():
                 glob.glob(str(canonical_path / "torch-spots*.pth"))
             )[-1]
         
-        checkpoint = torch.load(self.model_path)
+        checkpoint = torch.load(self.model_path, map_location=self.device)
         self.model.load_state_dict(checkpoint)
         self.model = self.model.eval().to(self.device)
         self.input_shape = 128
