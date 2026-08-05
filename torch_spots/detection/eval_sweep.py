@@ -3,8 +3,8 @@ from datetime import datetime
 import zarr
 import numpy as np
 
-from .inference import SpotDetection
-from .metrics import PointMetrics
+from torch_spots.detection.inference import SpotDetection
+from torch_spots.detection.metrics import PointMetrics
 
 import click
 import itertools
