@@ -21,7 +21,6 @@ class SpotDetection():
             device=None
     ):
         
-        self.model_path = model_path
         self.model = SpotNet()
 
         if device is None:
@@ -36,7 +35,7 @@ class SpotDetection():
 
             canonical_path = Path.home() / ".deepcell/models"
             # Use latest version
-            model_path = sorted(
+            self.model_path = sorted(
                 glob.glob(str(canonical_path / "torch-spots*.pth"))
             )[-1]
         
