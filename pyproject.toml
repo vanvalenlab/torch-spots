@@ -73,8 +73,6 @@ test = [
 ]
 
 [tool.setuptools]
-zip-safe = false
-include-package-data = false
 packages = [
     "torch_spots"
 ]
