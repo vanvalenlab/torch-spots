@@ -74,7 +74,8 @@ test = [
 
 [tool.setuptools]
 packages = [
-    "torch_spots"
+    "torch_spots.detection",
+    "torch_spots.decoding"
 ]
 platforms = [
     'Linux',
@@ -85,9 +86,6 @@ platforms = [
 
 [tool.setuptools.dynamic.version]
 attr = 'torch_spots.__version__'
-
-# [tool.setuptools.package-data]
-# torch_spots = ['tests/*.py']
 
 [tool.ruff]
 line-length = 110
