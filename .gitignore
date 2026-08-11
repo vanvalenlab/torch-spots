@@ -7,3 +7,5 @@ _auth.py
 SpotNetExampleData-v1_0/
 *.ims
 *.csv
+*.egg-info
+build/
