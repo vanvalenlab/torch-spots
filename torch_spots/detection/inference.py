@@ -38,6 +38,8 @@ class SpotDetection():
             self.model_path = sorted(
                 glob.glob(str(canonical_path / "torch-spots*.pth"))
             )[-1]
+        else:
+            self.model_path = self.model_path
         
         checkpoint = torch.load(self.model_path, map_location=self.device)
         self.model.load_state_dict(checkpoint)

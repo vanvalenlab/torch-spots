@@ -47,7 +47,8 @@ dependencies = [
     "tqdm",
     "zarr",
     "click",
-    "pandas"
+    "pandas",
+    "tensorboard"
 ]
 
 [[project.authors]]
