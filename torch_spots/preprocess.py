@@ -35,7 +35,7 @@ def convert_to_zarr(filename, out_dir=None):
 
     print(f"    Writing {split}.")
 
-    images = store.create_dataset(
+    images = store.create_array(
         "X",
         shape=(B, C, H, W),
         chunks=(1, C, H, W),  # One sample per chunk — common for ML
@@ -45,14 +45,14 @@ def convert_to_zarr(filename, out_dir=None):
 
     N_max = max(len(pts) for pts in y)
 
-    points = store.create_dataset(
+    points = store.create_array(
         "y",
         shape=(B, N_max, 2),
         chunks=(1, N_max, 2),
         dtype="float32",
         fill_value=0.0,
     )
-    lengths = store.create_dataset("y_inds", shape=(B,), dtype="int32")
+    lengths = store.create_array("y_inds", shape=(B,), dtype="int32")
 
     for i, pts in enumerate(y):
         points[i, :len(pts)] = pts
