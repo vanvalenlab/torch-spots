@@ -45,7 +45,7 @@ dependencies = [
     "torch",
     "torchvision",
     "tqdm",
-    "zarr",
+    "zarr>=3",
     "click",
     "pandas",
     "tensorboard"
