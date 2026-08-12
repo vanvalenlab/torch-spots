@@ -35,9 +35,10 @@ class SpotDetection():
 
             canonical_path = Path.home() / ".deepcell/models"
             # Use latest version
-            self.model_path = sorted(
+            model_path = sorted(
                 glob.glob(str(canonical_path / "torch-spots*.pth"))
             )[-1]
+            
         self.model_path = model_path
         
         checkpoint = torch.load(self.model_path, map_location=self.device)
