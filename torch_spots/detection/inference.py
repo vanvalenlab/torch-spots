@@ -86,7 +86,7 @@ class SpotDetection():
             delta_y = y_pred['offsets'][ind,0]
             delta_x = y_pred['offsets'][ind,1]
 
-            dot_temp = np.zeros_like(dot_pixel_inds)
+            dot_temp = np.zeros_like(dot_pixel_inds, dtype=np.float32)
 
             for i, (y_ind, x_ind) in enumerate(dot_pixel_inds):
                 dot_temp[i, 0] = y_ind + delta_y[y_ind, x_ind] + y_offsets[ind]
@@ -147,7 +147,7 @@ class SpotDetection():
             delta_y = y_pred['offsets'][ind,0]
             delta_x = y_pred['offsets'][ind,1]
 
-            dot_temp = np.zeros_like(dot_pixel_inds)
+            dot_temp = np.zeros_like(dot_pixel_inds, dtype=np.float32)
 
             for i, (y_ind, x_ind) in enumerate(dot_pixel_inds):
                 dot_temp[i, 0] = y_ind + delta_y[y_ind, x_ind]
