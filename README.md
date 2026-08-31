@@ -140,3 +140,11 @@ result = app.predict(intensities)
 ## Installation issues
 
 If your GPU's CUDA drivers do not support the default PyTorch version, you get an error at the start of inference. To fix this, install a PyTorch version that matches your GPU.
+
+## Joining the Hugging Face organzation and generating a Hugging Face access token
+
+To use our models, you first need to create a free Hugging Face account and join the Van Valen Lab organization.
+
+Navigate to the [Hugging Face org site](https://huggingface.co/vanvalenlab) and join the organization. You will be automatically added as a "Read" member. You will now have access to the model weights (which are private and only avaialble to members of the org).
+
+Next, you will need to generate your Access Token. Navigate to the [Access Tokens](https://huggingface.co/settings/tokens) site and generate one. You will then export it as the environmental variable `HF_TOKEN`. This way, when you instantiate the model for the first time, the HF CLI will automatically check the value of this environmental variable and log you in before donwloading the model weights.

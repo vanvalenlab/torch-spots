@@ -1,6 +1,8 @@
 import numpy as np
 import torch
 
+from huggingface_hub import hf_hub_download
+
 from torch_spots.detection.dotnet import SpotNet
 from skimage.feature import peak_local_max
 
@@ -30,14 +32,10 @@ class SpotDetection():
 
         if model_path is None:
             
-            from deepcell_auth import download_torch_spots_model
-            download_torch_spots_model()
-
-            canonical_path = Path.home() / ".deepcell/models"
-            # Use latest version
-            model_path = sorted(
-                glob.glob(str(canonical_path / "torch-spots*.pth"))
-            )[-1]
+            hf_hub_download(repo_id='vanvalenlab/torch-spots', 
+                            filename='torch-spots_2026-07-29.pth',
+                            local_dir=Path.home() / '.deepcell/models')
+            model_path = Path.home() / '.deepcell/models/torch-spots_2026-07-29.pth'
             
         self.model_path = model_path
         
