@@ -35,7 +35,6 @@ classifiers = [
     'Topic :: Scientific/Engineering :: Image Analysis',
 ]
 dependencies = [
-    "deepcell_auth@git+https://github.com/vanvalenlab/deepcell-auth.git",
     "ipython",
     "matplotlib",
     "opencv-python-headless",
@@ -48,7 +47,8 @@ dependencies = [
     "zarr>=3",
     "click",
     "pandas",
-    "tensorboard"
+    "tensorboard",
+    "huggingface_hub"
 ]
 
 [[project.authors]]
