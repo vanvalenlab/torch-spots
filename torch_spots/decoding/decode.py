@@ -17,13 +17,13 @@ class SpotDecoding:
 
     Example::
 
-        from deepcell_spots.applications import SpotDecoding
+        from torch_spots.decoding.decode import SpotDecoding
 
         # Create the application
         app = SpotDecoding(df_barcodes, rounds, channels)
 
         # Decode the spots
-        decoding_dict = app.predict(spots_intensities_vec)
+        decoding_dict = app.predict(spot_probabilities)
 
     Args:
         df_barcodes (pandas.DataFrame): Codebook, the first column is gene names (`'Gene'`),
@@ -44,11 +44,9 @@ class SpotDecoding:
 
         rounds (int): Number of rounds.
         channels (int): Number of channels.
-        distribution (str): Distribution for spot intensities in spot decoding model. Valid options:
-            `['Gaussian', 'Bernoulli', 'Relaxed Bernoulli']`. Defaults to `'Relaxed Bernoulli'`.
         params_mode (str): Number of model parameters, whether the parameters are shared across
-            channels or rounds for model of Bernoulli or Relaxed Bernoulli distributions.
-            Valid options: `['2', '2*R', '2*C', '2*R*C', 'Gaussian']`. Defaults to `'2*R*C'`. 
+            channels or rounds for the Relaxed Bernoulli model.
+            Valid options: `['2', '2*R', '2*C', '2*R*C']`. Defaults to `'2*R*C'`. 
 
     Raises:
         ValueError: `df_barcodes` must be a Pandas DataFrame.
@@ -66,11 +64,9 @@ class SpotDecoding:
                  df_barcodes,
                  rounds,
                  channels,
-                 distribution='Relaxed Bernoulli',
                  params_mode='2*R*C'):
         self.rounds = rounds
         self.channels = channels
-        self.distribution = distribution
         self.params_mode = params_mode
 
         self._validate_codebook(df_barcodes)
@@ -111,9 +107,10 @@ class SpotDecoding:
         if valid_vals != set(vals.flatten()):
             raise ValueError('Barcode values must be 0 or 1.')
 
-        if 'Background' in df_barcodes.columns or 'Unknown' in df_barcodes.columns:
-            raise ValueError('Codebook should not include \'Background\' or \'Unknown\' values. '
-                             'These values will be added automatically.')
+        if df_barcodes['Gene'].isin(['Background', 'Unknown']).any():
+            raise ValueError('The Gene column should not include the reserved names '
+                             '\'Background\' or \'Unknown\'. These classes are added '
+                             'automatically.')
 
     def _add_bkg_unknown_to_barcodes(self, df_barcodes):
         """Add `Background` and `Unknown` barcodes to the codebook. The barcode of
@@ -146,27 +143,25 @@ class SpotDecoding:
         df_barcodes_aug.loc[len(df_barcodes_aug)+1] = ['Unknown'] + [-1] * (barcode_len)
         return df_barcodes_aug
     
-    def _validate_spots_intensities(self, spots_intensities_vec):
-        """Validate values of spot intensities before spot decoding prediction.
+    def _validate_spot_probabilities(self, spot_probabilities):
+        """Validate values of spot probabilities before spot decoding prediction.
 
         Args:
-            spots_intensities_vec (numpy.array): Array of spot probability values with shape
+            spot_probabilities (numpy.array): Array of spot probability values with shape
                 [num_spots, (rounds * channels)].
 
         Raises:
-            ValueError: Spot intensities should be bewteen 0 and 1 when `distribution` is
-                `'Relaxed Bernoulli'`.
-            ValueError: Spot intensities should be 0 or 1 when `distribution` is `'Bernoulli'`.
+            ValueError: The number of columns must equal `rounds * channels`.
+            ValueError: Spot probabilities must be in [0, 1].
         """
-        if self.distribution == 'Relaxed Bernoulli':
-            if (spots_intensities_vec > 1).any() or (spots_intensities_vec < 0).any():
-                raise ValueError('Spot intensities should be between 0 and 1 when '
-                                 'distribution=\'Relaxed Bernoulli\'.')
-            
-        if self.distribution == 'Bernoulli':
-            if {0,1} != set(spots_intensities_vec.flatten()):
-                raise ValueError('Spot intensities should be 0 or 1 when '
-                                    'distribution=\'Bernoulli\'.')
+        expected = self.rounds * self.channels
+        if spot_probabilities.ndim != 2 or spot_probabilities.shape[1] != expected:
+            raise ValueError('Spot probabilities must have shape [num_spots, {}] (one column per '
+                             'codebook bit), got shape {}.'.format(expected,
+                                                                   tuple(spot_probabilities.shape)))
+        if (spot_probabilities > 1).any() or (spot_probabilities < 0).any():
+            raise ValueError('Spot probability values must be in [0, 1], got values from {} to {}.'
+                             .format(spot_probabilities.min(), spot_probabilities.max()))
 
     def _decoding_output_to_dict(self, out):
         """Convert decoding output to dictionary.
@@ -185,8 +180,10 @@ class SpotDecoding:
         decoded_dict['probability'] = out['class_probs'].max(axis=1)
         decoded_dict['spot_index'] = np.arange(len(decoded_dict['probability']))
         decoded_dict['predicted_id'] = out['class_probs'].argmax(axis=1) + 1
+        # object dtype: a fixed-width string array would cut 'Unknown' or a rescued gene name
+        # down to the width of the longest name predicted so far
         decoded_dict['predicted_name'] = np.array(
-            list(map(barcodes_idx2name.get, decoded_dict['predicted_id'])))
+            list(map(barcodes_idx2name.get, decoded_dict['predicted_id'])), dtype=object)
         decoded_dict['source'] = np.repeat(
             'prediction', len(decoded_dict['probability'])).astype('U25')
         return decoded_dict
@@ -211,7 +208,7 @@ class SpotDecoding:
 
     def _rescue_errors(self,
                        decoding_dict,
-                       spots_intensities_vec):
+                       spot_probabilities):
         """Rescues decoded spots assigned as `'Background'` or `'Unknown'` by if their spot
         probability values have a Hamming distance of 1 from each of the barcodes.
 
@@ -220,7 +217,7 @@ class SpotDecoding:
                 keys: `'spot_index'`, `'probability'`, `'predicted_id'`,
                 `'predicted_name'`, `'source'`. This dictionary has already been processed to
                 assign low probability predictions to `'Unknown'`.
-            spots_intensities_vec (numpy.array): Array of spot probability values with shape
+            spot_probabilities (numpy.array): Array of spot probability values with shape
                 `[num_spots, (rounds * channels)]`.
         Returns:
             dict: Dictionary with keys: `'spot_index'`, `'probability'`, `'predicted_id'`,
@@ -244,7 +241,7 @@ class SpotDecoding:
                 attempted += 1
                 dist_list = np.zeros(num_barcodes)
                 for ii in range(num_barcodes):
-                    dist_list[ii] = distance.hamming(np.round(spots_intensities_vec[i]),
+                    dist_list[ii] = distance.hamming(np.round(spot_probabilities[i]),
                                                      barcodes_array[ii])
                 scaled_dist_list = dist_list * barcode_len
                 if 1 in scaled_dist_list:
@@ -270,7 +267,7 @@ class SpotDecoding:
     
     def _rescue_mixed_spots(self,
                             decoding_dict,
-                            spots_intensities_vec,
+                            spot_probabilities,
                             prob_threshold=0.95):
         """Rescues decoded spots assigned as `'Background'` or `'Unknown'` by if their spot
         probability values have a Hamming distance of 1 from each of the barcodes.
@@ -279,7 +276,7 @@ class SpotDecoding:
             decoding_dict (dict): Dictionary containing decoded spot identities with
                 keys: `'spot_index'`, `'probability'`, `'predicted_id'`,
                 `'predicted_name'`, `'source'`.
-            spots_intensities_vec (numpy.array): Array of spot probability values with shape
+            spot_probabilities (numpy.array): Array of spot probability values with shape
                 `[num_spots, (rounds * channels)]`.
             df_barcodes (pd.DataFrame): Codebook, the first column is gene names (`'Gene'`),
                 the rest are binary barcodes, encoded using 1 and 0. Index should start at 1.
@@ -325,12 +322,12 @@ class SpotDecoding:
                 
                 # gene ids are 1-indexed
                 barcode = barcodes_array[gene_id-1]
-                intensities_updated = spots_intensities_vec[i].copy()
-                intensities_updated[barcode==1] = 0
+                probabilities_updated = spot_probabilities[i].copy()
+                probabilities_updated[barcode==1] = 0
 
                 dist_list = np.zeros(num_barcodes)
                 for ii in range(num_barcodes):
-                    dist_list[ii] = distance.hamming(np.round(intensities_updated),
+                    dist_list[ii] = distance.hamming(np.round(probabilities_updated),
                                                      barcodes_array[ii])
                 scaled_dist_list = dist_list * barcode_len
                 if 1 in scaled_dist_list:
@@ -361,36 +358,55 @@ class SpotDecoding:
         return(result)
 
     def predict(self,
-                spots_intensities_vec,
+                spot_probabilities,
+                locations=None,
+                *,
                 num_iter=500,
                 batch_size=1000,
+                seed=1,
                 pred_prob_thresh=0.95,
                 rescue_errors=True,
-                rescue_mixed=False):
+                rescue_mixed=False,
+                genes_only=False):
         """Predict the gene assignment of each spot.
 
         Args:
-            spots_intensities_vec (numpy.array): Array of spot probability values with shape
-                `[num_spots, (rounds * channels)]`.
+            spot_probabilities (numpy.array): Array of spot probability values with shape
+                `[num_spots, (rounds * channels)]`, in [0, 1]. Column *i* belongs to codebook bit
+                column *i*.
+            locations (numpy.array): Optional integer `[y, x]` (row, column) location of each spot,
+                shape `[num_spots, 2]`, as returned by the detection hand-off. When given, the
+                table has `y` and `x` columns.
             num_iter (int): Number of iterations for training. Defaults to 500.
             batch_size (int): Size of batches for training. Defaults to 1000.
-            pred_prob_thresh (float): The threshold of unknown category, within [0,1]. Defaults to 0.5.
+            seed (int): Seed for randomness. It sets which minibatch of spots each training
+                iteration sees. Defaults to 1.
+            pred_prob_thresh (float): The threshold of unknown category, within [0,1]. Defaults to 0.95.
             rescue_errors (bool): Whether to check if `'Background'`-  and `'Unknown'`-assigned
                 spots have a Hamming distance of 1 to other barcodes.
             rescue_mixed (bool): Whether to check if low probability predictions are the result of
                 two mixed barcodes.
+            genes_only (bool): Drop every row labelled `'Background'`, `'Unknown'` or `'Blank'`
+                (a name containing `Blank`). Applied last, so it never changes which spots are
+                rescued. Defaults to False.
 
         Returns:
-            dict: Dictionary with keys: `'spot_index'`, `'probability'`, `'predicted_id'`,
-                `'predicted_name'`, `'source'`.
+            pandas.DataFrame: One row per spot, in input order, followed by any rows added by
+                mixed rescue. Columns: `'spot_index'`, `'y'`, `'x'` (only with `locations`),
+                `'predicted_id'`, `'predicted_name'`, `'probability'`, `'source'`, then one
+                `'prob_<codebook column>'` per bit. The settings and the fitted weights, sigma,
+                temperature and per-iteration losses are kept on `self.last_run`.
         """
 
-        assert spots_intensities_vec.shape[-1] % self.channels == 0, "Make sure the shape is correct"
-        assert spots_intensities_vec.shape[-1] % self.rounds == 0, "Make sure the shape is correct"
+        spot_probabilities = np.asarray(spot_probabilities)
+        self._validate_spot_probabilities(spot_probabilities)
+        if locations is not None:
+            locations = np.asarray(locations)
+            if locations.shape != (spot_probabilities.shape[0], 2):
+                raise ValueError('locations must have shape [num_spots, 2] = {}, got {}.'.format(
+                    (spot_probabilities.shape[0], 2), tuple(locations.shape)))
 
-        self._validate_spots_intensities(spots_intensities_vec)
-
-        spots_intensities_reshaped = np.reshape(spots_intensities_vec,
+        spot_probabilities_reshaped = np.reshape(spot_probabilities,
                                                 (-1, self.channels, self.rounds))
 
         # convert df_barcodes to an array
@@ -401,11 +417,11 @@ class SpotDecoding:
                                                                    self.rounds)[:-1, :, :]
 
         # decode
-        out = decoding_function(spots_intensities_reshaped,
+        out = decoding_function(spot_probabilities_reshaped,
                                 barcodes_array,
                                 num_iter=num_iter,
                                 batch_size=batch_size,
-                                distribution=self.distribution,
+                                seed=seed,
                                 params_mode=self.params_mode)
         decoding_dict = self._decoding_output_to_dict(out)
         decoding_dict_trunc = self._threshold_unknown_by_prob(
@@ -414,10 +430,51 @@ class SpotDecoding:
         if rescue_errors:
             print('Revising errors...')
             decoding_dict_trunc = self._rescue_errors(decoding_dict_trunc,
-                                                      spots_intensities_vec)
+                                                      spot_probabilities)
         if rescue_mixed:
             print('Correcting mixed barcodes...')
             decoding_dict_trunc = self._rescue_mixed_spots(decoding_dict_trunc,
-                                                           spots_intensities_vec)
-        
-        return decoding_dict_trunc
+                                                           spot_probabilities)
+
+        table = self._build_table(decoding_dict_trunc, spot_probabilities, locations, ch_names)
+        if genes_only:
+            names = table['predicted_name']
+            table = table[~(names.isin(['Background', 'Unknown'])
+                            | names.str.contains('Blank', regex=False))].reset_index(drop=True)
+
+        params = out.get('params', {})
+        self.last_run = {
+            'settings': {'params_mode': self.params_mode, 'num_iter': num_iter,
+                         'batch_size': batch_size, 'seed': seed,
+                         'pred_prob_thresh': pred_prob_thresh, 'rescue_errors': rescue_errors,
+                         'rescue_mixed': rescue_mixed, 'genes_only': genes_only},
+            'weights': _to_numpy(params.get('w_star')),
+            'sigma': _to_numpy(params.get('sigma_star')),
+            'temperature': _to_numpy(params.get('temperature_star')),
+            'losses': list(params.get('losses', [])),
+        }
+
+        return table
+
+    @staticmethod
+    def _build_table(decoding_dict, spot_probabilities, locations, bit_names):
+        """Assemble the output table. `y`, `x` and the probabilities are looked up through
+        `spot_index`, so rows added by mixed rescue carry their own spot's values."""
+        spot_index = np.asarray(decoding_dict['spot_index'])
+        columns = {'spot_index': spot_index}
+        if locations is not None:
+            columns['y'] = locations[spot_index, 0]
+            columns['x'] = locations[spot_index, 1]
+        columns['predicted_id'] = np.asarray(decoding_dict['predicted_id'])
+        columns['predicted_name'] = np.asarray(decoding_dict['predicted_name'])
+        columns['probability'] = np.asarray(decoding_dict['probability'])
+        columns['source'] = np.asarray(decoding_dict['source'])
+        table = pd.DataFrame(columns)
+        probs = pd.DataFrame(spot_probabilities[spot_index],
+                             columns=['prob_{}'.format(name) for name in bit_names])
+        return pd.concat([table, probs], axis=1)
+
+
+def _to_numpy(value):
+    return None if value is None else value.detach().cpu().numpy() if hasattr(value, 'detach') \
+        else np.asarray(value)

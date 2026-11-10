@@ -1,5 +1,5 @@
-"""Variational Inference functions for spot decoding. Code adapted from PoSTcode
-https://github.com/gerstung-lab/postcode (https://doi.org/10.1101/2021.10.12.464086)."""
+"""Post-processing helpers for the detection output: turning probability maps into point
+lists, and reading per-image spot probabilities at candidate locations for decoding."""
 
 import numpy as np
 
@@ -189,52 +189,49 @@ def y_annotations_to_point_list_cc(y_pred, threshold=0.95):
         dot_centers.append(dot_centers_temp)
     return np.concatenate(dot_centers)
 
-def extract_spots_prob_from_coords_maxpool(image, spots_locations, extra_pixel_num=1):
-    """Perform a max pooling and extract the intensities for each spot.
+def extract_spots_prob_from_coords_maxpool(image, spots_locations, pool_size=1):
+    """Read the spot probability at each candidate location, optionally max-pooled.
 
     Args:
-        image (numpy.array): Probability maps with shape ``[batch, x, y, channel]``.
-        spots_locations (numpy.array): Coordiantes found by max projection, used as anchor
-            points for further max pooling operation. Shape ``[num_spots, 2]``.
-        extra_pixel_num (int): Parameter for size of the pool. Defaults to 1, meaning
-            a pool with size=(1,0,-1)x(1,0,-1)
+        image (numpy.array): Probability maps with shape ``[batch, channel, H, W]``.
+        spots_locations (numpy.array): Integer ``[y, x]`` candidate locations (row, column),
+            shape ``[num_spots, 2]``.
+        pool_size (int): Half-width of the pooling window. The value taken is the maximum over
+            the ``(2 * pool_size + 1) ** 2`` window around each location, clipped to the image
+            border. 0 reads the pixel itself. Defaults to 1.
 
     Returns:
-        list: Spots intensities, each entry in the list is a numpy.array with shape
+        list: Spot probabilities, each entry in the list is a numpy.array with shape
         ``[num_spots, channel]``.
     """
 
-    if extra_pixel_num < 0:
+    if pool_size < 0:
         raise ValueError(
-            "extra_pixel_num should be a positive integer \
-            (zero included), but got {}".format(
-                extra_pixel_num
-            )
+            "pool_size should be a non-negative integer, but got {}".format(pool_size)
         )
-        
-    spots_intensities = []
+
+    spot_probabilities = []
     for idx_batch in range(len(image)):
         image_slice = image[idx_batch]  # [channel, H, W]
 
         num_spots = spots_locations.shape[0]
-        img_boundary_x = image_slice.shape[1] - 1  # H
-        img_boundary_y = image_slice.shape[2] - 1  # W
+        img_boundary_y = image_slice.shape[1] - 1  # H, last row
+        img_boundary_x = image_slice.shape[2] - 1  # W, last column
 
-        intensity_d = np.zeros(((extra_pixel_num * 2 + 1) ** 2, num_spots, image_slice.shape[0]))  # channels first
+        window_values = np.zeros(((pool_size * 2 + 1) ** 2, num_spots, image_slice.shape[0]))  # channels first
         d = -1
-        for dx in np.arange(-extra_pixel_num, extra_pixel_num + 1):
-            for dy in np.arange(-extra_pixel_num, extra_pixel_num + 1):
+        for dy in np.arange(-pool_size, pool_size + 1):
+            for dx in np.arange(-pool_size, pool_size + 1):
                 d += 1
                 for ind_cr in range(image_slice.shape[0]):  # iterate over channels
-                    x_coord = np.maximum(0, np.minimum(img_boundary_x, np.around(spots_locations[:, 0]) + dx))
-                    y_coord = np.maximum(0, np.minimum(img_boundary_y, np.around(spots_locations[:, 1]) + dy))
+                    y_coord = np.maximum(0, np.minimum(img_boundary_y, np.around(spots_locations[:, 0]) + dy))
+                    x_coord = np.maximum(0, np.minimum(img_boundary_x, np.around(spots_locations[:, 1]) + dx))
 
-                    intensity_d[d, :, ind_cr] = image_slice[ind_cr, x_coord, y_coord]  # channel first indexing
+                    window_values[d, :, ind_cr] = image_slice[ind_cr, y_coord, x_coord]  # channel first indexing
 
-        intensity = np.max(intensity_d, axis=0)
-        spots_intensities.append(intensity)
+        spot_probabilities.append(np.max(window_values, axis=0))
 
-    return spots_intensities
+    return spot_probabilities
 
 
 ########################################################################
@@ -467,69 +464,6 @@ def tile_image(image, model_input_shape=(512, 512), stride_ratio=1.0, pad_mode='
         'pad_x':        pad_x,
         'pad_y':        pad_y,
     }
-
-def percentile_threshold(image: np.typing.ArrayLike, percentile=99.9):
-    """Threshold an image to reduce bright spots
-
-    Args:
-        image: numpy array of image data with expected shape `[batch, C, H, W]`
-        percentile: cutoff used to threshold image
-
-    Returns:
-        np.array: thresholded version of input image
-    """
-    processed_image = np.zeros_like(image, dtype=np.float32)
-
-    B, C, _, _ = image.shape
-    flat = image.reshape(B, C, -1)  # [B, C, H*W]
-
-    has_nonzero = (flat > 0).any(axis=-1)  # [B, C]
-
-    # Compute percentile over spatial dims; mask zero values with nan to exclude them
-    flat_nan = np.where(flat > 0, flat.astype(float), np.nan)
-    thresholds = np.nanpercentile(flat_nan, percentile, axis=-1)  # [B, C]
-
-    # Only apply threshold where channel isn't blank
-    thresholds = np.where(has_nonzero, thresholds, np.nan)  # [B, C]
-
-    # Clip each (img, channel) slice to its threshold — expand dims for broadcasting
-    thresh_expanded = thresholds[:, :, np.newaxis, np.newaxis]  # [B, C, 1, 1]
-    clipped = np.minimum(image, thresh_expanded)
-
-    # Zero out blank channels (preserve zeros_like behavior)
-    processed_image = np.where(has_nonzero[:, :, np.newaxis, np.newaxis], clipped, processed_image)
-
-    return processed_image.astype(np.float32)
-
-def minmax_normalization(image):
-
-    channel_min = np.min(image, axis=(1,2,3), keepdims=True).astype(np.float32)
-    channel_max = np.max(image, axis=(1,2,3), keepdims=True).astype(np.float32)
-
-    image_minmax = (image - channel_min)/(channel_max-channel_min)
-
-    return image_minmax
-
-# pre- and post-processing functions
-def spotnet_preprocess(image):
-    """Preprocess input data for Mesmer model.
-
-    Args:
-        image: array to be processed
-
-    Returns:
-        np.array: processed image array
-    """
-
-    if len(image.shape) != 4:
-        raise ValueError(f"Image data must be 4D, got image of shape {image.shape}")
-
-    output = np.copy(image)
-
-    output = percentile_threshold(image=output, percentile=99.9)
-    output = minmax_normalization(image=output)
-    
-    return output
 
 def tile_input(image, model_image_shape, pad_mode='constant', stride_ratio = 1.0):
     """

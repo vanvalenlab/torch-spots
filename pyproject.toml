@@ -97,3 +97,6 @@ target-version="py310"
 [tool.ruff.lint]
 exclude = ["*.ipynb"]
 select = ["E", "F", "UP"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

@@ -1,99 +1,96 @@
-import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 
 # ---------------------------------------------------------------------------
-# Helper: per-image standardisation  (norm_method='std')
+# In-model input normalisation
 # ---------------------------------------------------------------------------
 
-def image_normalize_std(x: torch.Tensor) -> torch.Tensor:
-    """Standardise each image in a batch to zero mean, unit std.
+_NORM_EPSILON = 1e-7        # Keras K.epsilon()
+
+
+def _box(t: torch.Tensor, filter_size: int) -> torch.Tensor:
+    """Mean over a ``filter_size`` square window, with zero padding outside the image.
+
+    Matches deepcell's depthwise convolution with ``padding='SAME'`` and a kernel
+    of ones divided by ``filter_size**2 * C`` (``deepcell/layers/normalization.py:130-142``).
+    Written with ``avg_pool2d`` so it never runs in reduced (TF32) precision, which
+    the subtraction in :func:`local_std_normalize` could not tolerate.
+    """
+    channels = t.shape[1]
+    pooled = F.avg_pool2d(t, filter_size, stride=1, padding=filter_size // 2,
+                          count_include_pad=True)       # window sum / filter_size**2
+    return pooled / channels                            # deepcell's extra 1 / C
+
+
+def local_std_normalize(x: torch.Tensor, filter_size: int = 13) -> torch.Tensor:
+    """deepcell's ``norm_method='std'``: local mean removal and local std scaling.
+
+    ``o = x - box(x)``, then ``o / (sqrt(box(o**2) - box(o)**2) + 1e-7)``, where
+    ``box`` is a ``filter_size`` x ``filter_size`` window mean with zero padding
+    (source: ``deepcell/layers/normalization.py:164-178,189-191``).
+
+    The variance is clamped at 0 before the square root.  In float32 it can come
+    out a few ULP below 0, where TensorFlow would return NaN.
 
     Args:
-        x: (B, C, H, W)  – raw input images.
-
-    Returns:
-        (B, C, H, W)  – normalised images.
+        x: (B, C, H, W) raw images.
     """
-    # Compute per-(batch-item, channel) mean and std over spatial dims
-    mean = x.mean(dim=(-2, -1), keepdim=True)   # (B, C, 1, 1)
-    std  = x.std(dim=(-2, -1), keepdim=True).clamp(min=1e-8)  # (B, C, 1, 1)
-    return (x - mean) / std
+    o = x - _box(x, filter_size)
+    var = (_box(o * o, filter_size) - _box(o, filter_size) ** 2).clamp(min=0)
+    return o / (var.sqrt() + _NORM_EPSILON)
 
 
-# ---------------------------------------------------------------------------
-# Helper: 'same'-padding Conv2d
-#
-# PyTorch's nn.Conv2d only accepts integer (symmetric) padding.  For even
-# kernel sizes (e.g. k=4, d=1) the required total padding is odd (3), which
-# cannot be split symmetrically.  We handle this with an explicit asymmetric
-# F.pad before the convolution.
-#
-# Total padding per axis:  d*(k-1)   →  floor / ceil split for odd totals.
-# ---------------------------------------------------------------------------
-
-class ReflectPadConv2d(nn.Module):
-    """Conv2d with 'same' spatial padding, supporting even kernels and dilation.
-
-    For a convolution with kernel k and dilation d the effective kernel size is
-        eff_k = d*(k-1) + 1
-    To preserve the spatial dimension we need total padding per axis:
-        total_pad = eff_k - 1 = d*(k-1)
-    Applied as (floor(total/2), ceil(total/2)) on each axis.
+def whole_image_normalize(x: torch.Tensor) -> torch.Tensor:
+    """deepcell's ``norm_method='whole_image'``: per image and channel, subtract the
+    mean and divide by the population std plus 1e-7
+    (source: ``deepcell/layers/normalization.py:180-183``).
 
     Args:
-        in_channels:  Input channel count.
-        out_channels: Output channel count.
-        kernel_size:  Spatial kernel size (int, square).
-        dilation:     Dilation factor.
-        bias:         Whether to add a learnable bias.
+        x: (B, C, H, W) raw images.
     """
-
-    def __init__(self, in_channels: int, out_channels: int,
-                 kernel_size: int, dilation: int = 1, bias: bool = False):
-        super().__init__()
-        total_pad = dilation * (kernel_size - 1)   # total pad needed per axis
-        self.pad  = (total_pad // 2,               # left  / top
-                     math.ceil(total_pad / 2))     # right / bottom
-        self.conv = nn.Conv2d(in_channels, out_channels,
-                              kernel_size=kernel_size,
-                              dilation=dilation,
-                              padding=0,           # padding handled manually
-                              bias=bias)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # F.pad order: (left, right, top, bottom)
-        p = self.pad
-        x = F.pad(x, (p[0], p[1], p[0], p[1]), mode='reflect')
-        return self.conv(x)
+    mean = x.mean(dim=(-2, -1), keepdim=True)
+    std = x.std(dim=(-2, -1), keepdim=True, unbiased=False)
+    return (x - mean) / (std + _NORM_EPSILON)
 
 
 # ---------------------------------------------------------------------------
-# Helper: conv block  Conv2D → BN → ReLU
+# Helper: BatchNorm with Keras's constants
+# ---------------------------------------------------------------------------
+
+def _bn(n: int) -> nn.BatchNorm2d:
+    """BatchNorm2d matching Keras's defaults (momentum 0.99, epsilon 1e-3).
+
+    PyTorch's ``momentum`` is the weight given to the *new* batch, so Keras's 0.99
+    on the old value is 0.01 here: ``running = 0.99 * running + 0.01 * batch``.
+    Sources: ``deepcell/model_zoo/featurenet.py:153,202``, ``deepcell_spots/dotnet.py:63``.
+    """
+    return nn.BatchNorm2d(n, momentum=0.01, eps=1e-3)
+
+
+# ---------------------------------------------------------------------------
+# Helper: conv block  Conv2D (no padding) → BN → ReLU
 # ---------------------------------------------------------------------------
 
 def conv_bn_relu(in_ch: int, out_ch: int,
                  kernel_size: int = 3,
                  dilation: int = 1) -> nn.Sequential:
-    """Return a SamePadConv2d → BatchNorm2D → ReLU block.
+    """Return an unpadded Conv2d → BatchNorm2d → ReLU block.
 
-    Uses SamePadConv2d so H, W are always preserved, even for even kernels.
+    The convolution shrinks its input by ``dilation * (kernel_size - 1)`` pixels
+    per axis.  The caller pads the image once up front (see ``BNFeatureNet2D``).
 
     Args:
         in_ch:       Number of input channels.
         out_ch:      Number of output channels.
         kernel_size: Spatial extent of the filter.
         dilation:    Dilation factor for the convolution.
-
-    Returns:
-        nn.Sequential of (SamePadConv2d, BatchNorm2d, ReLU).
     """
     return nn.Sequential(
-        ReflectPadConv2d(in_ch, out_ch, kernel_size=kernel_size,
-                      dilation=dilation, bias=False),
-        nn.BatchNorm2d(out_ch),
+        nn.Conv2d(in_ch, out_ch, kernel_size=kernel_size,
+                  dilation=dilation, padding=0, bias=False),
+        _bn(out_ch),
         nn.ReLU(inplace=True),
     )
 
@@ -108,30 +105,30 @@ class BNFeatureNet2D(nn.Module):
     Mirrors ``bn_feature_net_2D`` from deepcell-tf called with
     ``dilated=True, padding=True, include_top=False``.
 
-    The network contains:
-      1.  A *convolutional block* whose depth is controlled by
-          ``receptive_field``.  With receptive_field=13 the while-loop in the
-          original code runs two conv layers (4×4 then 3×3) before triggering
-          one dilated pool.  We reproduce the same number of layers but use
-          same-padding throughout so that H, W are never reduced.
+    The input is mirror-padded once by ``(receptive_field - 1) // 2`` pixels on
+    every side.  After that no layer pads anything: each convolution and the
+    pooling step shrink the image, and the total shrinkage is exactly the
+    padding, so the output is the same height and width as the input and each
+    output pixel sees the centred ``receptive_field`` × ``receptive_field``
+    window.
 
-      2.  A *dense conv* – the final Conv2D that projects to ``n_dense_filters``
-          channels.
+    With receptive_field=13 the layers are:
+        4×4 conv (32) → BN → ReLU → 3×3 conv (32) → BN → ReLU →
+        2×2 max-pool, stride 1 → 4×4 conv, dilation 2 (128) → BN → ReLU
+    Spatial size for a 128-px input: 140 → 137 → 135 → 134 → 128.
 
-    Input / output shapes (channels_last → channels_first in PyTorch):
+    Input / output shapes:
         Input:  (B, in_channels, H, W)
         Output: (B, n_dense_filters, H, W)   [128 by default]
 
     Args:
         in_channels     (int):  Number of input channels.
-        receptive_field (int):  Controls the depth of the conv stack.
-                                Default 13 → 2 conv layers + 1 dilated pool
-                                + 1 dense conv.
+        receptive_field (int):  Controls the depth of the conv stack.  Default 13.
         n_conv_filters  (int):  Number of filters in the conv stack.  Default 32.
         n_dense_filters (int):  Number of filters in the final dense conv.
                                 This is the output channel depth.  Default 128.
-        reg             (float): L2 weight-decay (passed to optimiser separately
-                                 in PyTorch; stored as an attribute for reference).
+        reg             (float): L2 weight-decay (applied in the training loop;
+                                 stored as an attribute for reference).
     """
 
     def __init__(self,
@@ -148,22 +145,18 @@ class BNFeatureNet2D(nn.Module):
         self.reg             = reg
 
         # ------------------------------------------------------------------
-        # Build the convolutional stack by simulating the original while-loop
-        # ------------------------------------------------------------------
-        # The loop iterates until rf_counter <= 4, choosing kernel size 4 when
-        # rf_counter is odd and 3 when it is even.  Every 2nd block it fires a
-        # dilated max-pool (d doubles) and halves rf_counter.
+        # Build the conv stack by following deepcell's while-loop.  It runs
+        # until rf_counter <= 4, using a 4×4 kernel when rf_counter is odd and
+        # 3×3 when even.  After every 2nd block it applies a stride-1 2×2
+        # max-pool with the *current* dilation, then doubles the dilation.
         #
         # For receptive_field=13:
-        #   iter 1: rf=13 (odd)  → k=4, rf_counter = 13-3 = 10, block=1
-        #   iter 2: rf=10 (even) → k=3, rf_counter = 10-2 = 8,  block=2
-        #           block%2==0  → pool, d: 1→2, rf_counter = 8//2 = 4
-        #   loop exits (rf_counter == 4, not > 4)
-        # Final dense conv: kernel = rf_counter=4, dilation=d=2
-        #
-        # We preserve the original conv geometry but use same-padding so the
-        # spatial dimensions H×W are unchanged throughout.
+        #   iter 1: rf=13 (odd)  → k=4, rf_counter = 10, block=1
+        #   iter 2: rf=10 (even) → k=3, rf_counter = 8,  block=2
+        #           pool (dilation 1), d: 1→2, rf_counter = 8//2 = 4
+        # Final dense conv: kernel = rf_counter = 4, dilation = d = 2.
         # ------------------------------------------------------------------
+        self.pad = (receptive_field - 1) // 2
 
         conv_layers = []
         rf_counter  = receptive_field
@@ -180,27 +173,17 @@ class BNFeatureNet2D(nn.Module):
             rf_counter -= (k - 1)
 
             if block_counter % 2 == 0:
-                # Original: DilatedMaxPool2D then d*=2, rf//=2
-                # We skip the pool (same-padding keeps full resolution) but
-                # still double d and halve rf_counter to match the receptive
-                # field geometry of the conv that follows.
+                # deepcell DilatedMaxPool2D: 2×2, stride 1, current dilation
+                conv_layers.append(nn.MaxPool2d(2, stride=1, dilation=d))
                 d *= 2
                 rf_counter = rf_counter // 2
 
         self.conv_stack = nn.Sequential(*conv_layers)
 
-        # Final "dense" conv: kernel=rf_counter, dilation=d
-        # Reduces the remaining receptive field to a single point.
-        # Uses SamePadConv2d to correctly handle any even/odd kernel+dilation.
+        # Final "dense" conv: kernel=rf_counter, dilation=d.
         dense_k = rf_counter          # 4 for receptive_field=13
-        self.dense_conv = nn.Sequential(
-            ReflectPadConv2d(ch, n_dense_filters,
-                          kernel_size=dense_k,
-                          dilation=d,
-                          bias=False),
-            nn.BatchNorm2d(n_dense_filters),
-            nn.ReLU(inplace=True),
-        )
+        self.dense_conv = conv_bn_relu(ch, n_dense_filters,
+                                       kernel_size=dense_k, dilation=d)
 
         # Record final dilation for inspection / tests
         self._final_dilation = d
@@ -215,7 +198,10 @@ class BNFeatureNet2D(nn.Module):
         Returns:
             (B, n_dense_filters, H, W)   e.g. (B, 128, H, W)
         """
-        x = self.conv_stack(x)   # (B, n_conv_filters, H, W)
+        # One mirror reflection (edge pixel not repeated); nothing else pads.
+        p = self.pad
+        x = F.pad(x, (p, p, p, p), mode='reflect')   # (B, C, H+2p, W+2p)
+        x = self.conv_stack(x)   # shrinks by the pool/conv geometry
         x = self.dense_conv(x)   # (B, n_dense_filters, H, W)
         return x
 
@@ -260,8 +246,10 @@ class BNFeatureNetSkip2D(nn.Module):
         n_conv_filters  (int):  Filters in conv stack of each sub-net.
                                 Default 32.
         n_dense_filters (int):  Output channels of each sub-net.  Default 128.
-        norm_method     (str):  Normalisation applied to the raw input.
-                                Currently only 'std' is supported.
+        norm_method     (str):  Normalisation applied to the raw input: None
+                                (the default, as in the published model, whose
+                                normalisation layers are pass-through), 'std'
+                                (local window) or 'whole_image'.
         last_only       (bool): If True, return only the final sub-net output.
                                 If False, return a list of all sub-net outputs.
     """
@@ -272,7 +260,7 @@ class BNFeatureNetSkip2D(nn.Module):
                  n_skips: int         = 3,
                  n_conv_filters: int  = 32,
                  n_dense_filters: int = 128,
-                 norm_method: str     = 'std',
+                 norm_method: str     = None,
                  last_only: bool      = True):
         super().__init__()
         self.input_channels  = input_channels
@@ -307,10 +295,11 @@ class BNFeatureNetSkip2D(nn.Module):
     def _normalize(self, x: torch.Tensor) -> torch.Tensor:
         """Apply input normalisation according to self.norm_method."""
         if self.norm_method == 'std':
-            return image_normalize_std(x)
-        if self.norm_method == None:
+            return local_std_normalize(x)
+        if self.norm_method == 'whole_image':
+            return whole_image_normalize(x)
+        if self.norm_method is None:
             return x
-        # Extend here for other norm methods (e.g. 'max', 'whole_image')
         raise ValueError(f"Unsupported norm_method: '{self.norm_method}'")
 
     def forward(self, x: torch.Tensor):

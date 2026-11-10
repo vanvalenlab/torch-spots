@@ -1,9 +1,16 @@
 """
 PointMetrics
 ============
-Evaluates a set of inferred 2-D points against a set of ground-truth 2-D
-points using optimal bipartite matching (Hungarian algorithm) plus a suite
-of spatial error metrics.
+ADDITIONAL metrics (not the benchmark metrics). Evaluates a set of inferred
+2-D points against ground truth using optimal bipartite matching (Hungarian
+algorithm) plus a suite of spatial error metrics.
+
+These are diagnostics only. They are never used to judge a benchmark or a
+divergence from the reference configuration; the reference (SpotNet) metric
+set is in ``torch_spots.detection.reference_metrics``. No field name here may
+equal a reference metric name (``reference_metrics.REFERENCE_FIELDS``).
+
+Points are ``[y, x]``.
 
 Inputs
 ------
@@ -48,11 +55,11 @@ class PointMetricsResult:
     # --- spatial error on matched pairs (pixels) ----------------------------
     mean_dist: float
     median_dist: float
-    rmse: float
+    euclidean_rmse: float               # sqrt(mean(d^2)) over matched pairs (NOT the reference RMSE)
     p95_dist: float                     # 95th-percentile distance
     max_dist: float
-    bias_x: float                       # mean signed Δx  (inferred − true)
-    bias_y: float                       # mean signed Δy  (inferred − true)
+    bias_x: float                       # mean signed column-axis offset (inferred − true)
+    bias_y: float                       # mean signed row-axis offset (inferred − true)
 
     # --- threshold-free spatial summary -------------------------------------
     chamfer_distance: float             # mean of both directed nearest-neighbour means
@@ -79,7 +86,7 @@ class PointMetricsResult:
             "Spatial error (matched pairs)",
             f"  Mean dist : {self.mean_dist:.4f} px",
             f"  Median    : {self.median_dist:.4f} px",
-            f"  RMSE      : {self.rmse:.4f} px",
+            f"  Euclid RMSE: {self.euclidean_rmse:.4f} px",
             f"  95th pct  : {self.p95_dist:.4f} px",
             f"  Max dist  : {self.max_dist:.4f} px",
             f"  Bias Δx   : {self.bias_x:+.4f} px",
@@ -93,20 +100,20 @@ class PointMetricsResult:
     def return_fields(self):
 
         fields = np.array([
-            "true_positive",
-            "false_positive",
-            'false_negative',
-            'precision',
-            'recall',
-            'f1',
+            "hungarian_true_positive",
+            "hungarian_false_positive",
+            'hungarian_false_negative',
+            'hungarian_precision',
+            'hungarian_recall',
+            'hungarian_f1',
             'mean_dist',
             'median_dist',
-            'rmse',
-            'p95',
+            'euclidean_rmse',
+            'p95_dist',
             'max_dist',
             'bias_x',
             'bias_y',
-            'chamfer'
+            'chamfer_distance'
         ])
 
         return fields
@@ -122,7 +129,7 @@ class PointMetricsResult:
             self.f1, 
             self.mean_dist,
             self.median_dist,
-            self.rmse,
+            self.euclidean_rmse,
             self.p95_dist,
             self.max_dist,
             self.bias_x,
@@ -136,7 +143,7 @@ class PointMetricsResult:
         return (
             f"PointMetricsResult(TP={self.TP}, FP={self.FP}, FN={self.FN}, "
             f"precision={self.precision:.3f}, recall={self.recall:.3f}, "
-            f"f1={self.f1:.3f}, rmse={self.rmse:.3f} px, "
+            f"f1={self.f1:.3f}, euclidean_rmse={self.euclidean_rmse:.3f} px, "
             f"chamfer={self.chamfer_distance:.3f} px)"
         )
 
@@ -244,7 +251,7 @@ class PointMetrics:
             return PointMetricsResult(
                 threshold=threshold, TP=0, FP=self.N, FN=0,
                 precision=0.0, recall=0.0, f1=0.0,
-                mean_dist=0.0, median_dist=0.0, rmse=0.0,
+                mean_dist=0.0, median_dist=0.0, euclidean_rmse=0.0,
                 p95_dist=0.0, max_dist=0.0, bias_x=0.0, bias_y=0.0,
                 chamfer_distance=self._chamfer(),
                 matched_true_idx=np.array([], int),
@@ -257,7 +264,7 @@ class PointMetrics:
             return PointMetricsResult(
                 threshold=threshold, TP=0, FP=0, FN=self.M,
                 precision=0.0, recall=0.0, f1=0.0,
-                mean_dist=0.0, median_dist=0.0, rmse=0.0,
+                mean_dist=0.0, median_dist=0.0, euclidean_rmse=0.0,
                 p95_dist=0.0, max_dist=0.0, bias_x=0.0, bias_y=0.0,
                 chamfer_distance=self._chamfer(),
                 matched_true_idx=np.array([], int),
@@ -303,21 +310,21 @@ class PointMetrics:
         if TP > 0:
             mean_dist   = float(np.mean(tp_dists))
             median_dist = float(np.median(tp_dists))
-            rmse        = float(np.sqrt(np.mean(tp_dists ** 2)))
+            euclidean_rmse = float(np.sqrt(np.mean(tp_dists ** 2)))
             p95_dist    = float(np.percentile(tp_dists, 95))
             max_dist    = float(np.max(tp_dists))
             delta       = self.inferred_pts[tp_infer_idx] - self.true_pts[tp_true_idx]
-            bias_x      = float(np.mean(delta[:, 0]))
-            bias_y      = float(np.mean(delta[:, 1]))
+            bias_y      = float(np.mean(delta[:, 0]))  # points are [y, x]: column 0 is the row axis
+            bias_x      = float(np.mean(delta[:, 1]))
         else:
-            mean_dist = median_dist = rmse = p95_dist = max_dist = 0.0
+            mean_dist = median_dist = euclidean_rmse = p95_dist = max_dist = 0.0
             bias_x = bias_y = 0.0
 
         return PointMetricsResult(
             threshold=threshold,
             TP=TP, FP=FP, FN=FN,
             precision=precision, recall=recall, f1=f1,
-            mean_dist=mean_dist, median_dist=median_dist, rmse=rmse,
+            mean_dist=mean_dist, median_dist=median_dist, euclidean_rmse=euclidean_rmse,
             p95_dist=p95_dist, max_dist=max_dist,
             bias_x=bias_x, bias_y=bias_y,
             chamfer_distance=self._chamfer(),
@@ -383,7 +390,7 @@ class PointMetrics:
         return PointMetricsResult(
             threshold=threshold, TP=0, FP=0, FN=0,
             precision=0.0, recall=0.0, f1=0.0,
-            mean_dist=0.0, median_dist=0.0, rmse=0.0,
+            mean_dist=0.0, median_dist=0.0, euclidean_rmse=0.0,
             p95_dist=0.0, max_dist=0.0, bias_x=0.0, bias_y=0.0,
             chamfer_distance=0.0,
             matched_true_idx=empty, matched_inferred_idx=empty,

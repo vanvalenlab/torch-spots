@@ -1,8 +1,12 @@
+import json
+import math
+from pathlib import Path
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_spots.detection.modules import BNFeatureNetSkip2D
+from torch_spots.detection.modules import BNFeatureNetSkip2D, _bn
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +43,7 @@ class ClassificationHead(nn.Module):
             # TensorProduct(n_dense_filters)  → BN → ReLU
             # (B, 128, H, W)  →  (B, 128, H, W)
             nn.Conv2d(in_channels, n_dense_filters, kernel_size=1, bias=False),
-            nn.BatchNorm2d(n_dense_filters),
+            _bn(n_dense_filters),
             nn.ReLU(inplace=True),
 
             # TensorProduct(n_features)
@@ -113,6 +117,110 @@ class OffsetRegressionHead(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Architecture version and checkpoint loading
+# ---------------------------------------------------------------------------
+
+#: Version of the function the network computes for given weights and settings.
+#: Version 1 is the implicit version of every checkpoint trained before this field existed.
+#: Increase it whenever a change alters that function, for example:
+#:   * the layers, kernel sizes, dilations, pooling or padding of the backbone or heads;
+#:   * how the input is normalised inside the model (``norm_method`` maths);
+#:   * BatchNorm momentum or epsilon;
+#:   * the image preprocessing that feeds the model (``preprocess_image``);
+#:   * how checkpoint parameters are named or laid out.
+#: Initial weights and training settings do NOT change it (they do not change what a
+#: trained checkpoint computes).
+#: Version 2: padded once per sub-network + max-pool, local 'std' normalisation, Keras
+#: BatchNorm constants, min-max-only preprocessing (model-architecture-parity).
+MODEL_ARCHITECTURE_VERSION = 2
+
+
+class IncompatibleCheckpointError(RuntimeError):
+    """A checkpoint was trained on a different network than the current code builds."""
+
+
+def load_spotnet(checkpoint_path, device='cpu') -> 'SpotNet':
+    """Build a SpotNet from a checkpoint's training record and load its weights.
+
+    Reads ``training_config.json`` next to the checkpoint. Raises
+    :class:`IncompatibleCheckpointError` if the file is missing, or its
+    ``model_architecture_version`` is missing or not :data:`MODEL_ARCHITECTURE_VERSION`.
+    Otherwise builds ``SpotNet(**record['model'])`` and loads the weights strictly (no
+    missing or unexpected parameters allowed).
+    """
+    checkpoint_path = Path(checkpoint_path)
+    record_path = checkpoint_path.resolve().parent / 'training_config.json'
+    hint = ("Check out the commit it was trained at to use it, or pass a checkpoint "
+            f"trained with architecture version {MODEL_ARCHITECTURE_VERSION}.")
+    if not record_path.is_file():
+        raise IncompatibleCheckpointError(
+            f"{checkpoint_path}: no training_config.json next to it, so its model architecture "
+            f"version is missing (current version {MODEL_ARCHITECTURE_VERSION}). {hint}")
+    with open(record_path) as fh:
+        record = json.load(fh)
+    recorded = record.get('model_architecture_version')
+    if recorded is None:
+        raise IncompatibleCheckpointError(
+            f"{checkpoint_path}: its training record has no model_architecture_version "
+            f"(missing; current version {MODEL_ARCHITECTURE_VERSION}). It was trained before "
+            f"versions were recorded. {hint}")
+    if recorded != MODEL_ARCHITECTURE_VERSION:
+        raise IncompatibleCheckpointError(
+            f"{checkpoint_path}: trained with model architecture version {recorded}, but the "
+            f"current version is {MODEL_ARCHITECTURE_VERSION}. {hint}")
+    if not isinstance(record.get('model'), dict):
+        raise IncompatibleCheckpointError(
+            f"{checkpoint_path}: its training record lists no model settings.")
+
+    model = SpotNet(**record['model'])
+    state = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(state, strict=True)
+    return model.eval().to(device)
+
+
+# ---------------------------------------------------------------------------
+# Weight initialisation
+# ---------------------------------------------------------------------------
+
+# Standard deviation of a unit normal truncated at +/- 2 sigma.  Keras divides
+# by this so the truncated distribution ends up with the intended std.
+_TRUNC2_STD = 0.87962566103423978
+
+
+def init_reference_weights(model: nn.Module) -> None:
+    """Initialise a SpotNet the way deepcell_spots 0.4.2 does.
+
+    * Backbone and classification-head kernels: Keras ``he_normal`` -- a normal
+      distribution cut off at 2 standard deviations, scaled so that its
+      standard deviation is sqrt(2 / fan_in).
+    * Regression-head kernels: normal with std 0.01.
+    * Every bias: 0.  BatchNorm scale 1 and shift 0.
+
+    Sources: ``deepcell/model_zoo/featurenet.py:58,150,199`` and
+    ``deepcell_spots/dotnet.py:39,61,65,89-90``.
+    """
+    def he_normal(conv: nn.Conv2d) -> None:
+        fan_in = conv.in_channels * conv.kernel_size[0] * conv.kernel_size[1]
+        s = math.sqrt(2.0 / fan_in) / _TRUNC2_STD
+        nn.init.trunc_normal_(conv.weight, mean=0.0, std=s, a=-2 * s, b=2 * s)
+
+    for part in (model.backbone, model.classification_head):
+        for m in part.modules():
+            if isinstance(m, nn.Conv2d):
+                he_normal(m)
+    for m in model.offset_regression_head.modules():
+        if isinstance(m, nn.Conv2d):
+            nn.init.normal_(m.weight, mean=0.0, std=0.01)
+
+    for m in model.modules():
+        if isinstance(m, nn.Conv2d) and m.bias is not None:
+            nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.BatchNorm2d):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+
+
+# ---------------------------------------------------------------------------
 # SpotNet  –  full model
 # ---------------------------------------------------------------------------
 
@@ -158,7 +266,8 @@ class SpotNet(nn.Module):
                                        Default 2 (background / spot).
         regression_feature_size(int):  Hidden channels in regression head.
                                        Default 256.
-        norm_method            (str):  Input normalisation.  Default 'std'.
+        norm_method            (str):  Input normalisation: None (default, as in the
+                                       published model), 'std' or 'whole_image'.
     """
 
     def __init__(self,
@@ -201,6 +310,8 @@ class SpotNet(nn.Module):
             in_channels             = n_dense_filters,
             regression_feature_size = regression_feature_size,
         )
+
+        init_reference_weights(self)
 
     def forward(self, x: torch.Tensor):
         """Full forward pass.
