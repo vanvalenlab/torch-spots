@@ -29,11 +29,11 @@ def make_store(path, n_images=4, n_spots_per_image=3, size=32, seed=0, attrs=Non
     return g
 
 
-def write_checkpoint(directory, name="m.pth", norm_method=None, version="current", record=None, seed=0):
-    """Save a randomly initialised SpotNet and a ``training_config.json`` next to it.
+def write_checkpoint(directory, name="m.pth", norm_method=None, record=None, seed=0,
+                     training_record=True):
+    """Save a randomly initialised SpotNet and, unless ``training_record=False``, a
+    ``training_config.json`` next to it recording its model settings.
 
-    ``version="current"`` writes the current architecture version; ``None`` leaves the field out
-    (a checkpoint from before versions were recorded); any other value is written as is.
     ``record`` is merged into the training record (e.g. to add a seed and dataset provenance).
     Returns the checkpoint path.
     """
@@ -42,18 +42,14 @@ def write_checkpoint(directory, name="m.pth", norm_method=None, version="current
 
     import torch
 
-    from torch_spots.detection.dotnet import MODEL_ARCHITECTURE_VERSION, SpotNet
+    from torch_spots.detection.dotnet import SpotNet
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(seed)
     torch.save(SpotNet(norm_method=norm_method).state_dict(), directory / name)
-    rec = {"model": {"norm_method": norm_method}}
-    if version == "current":
-        rec["model_architecture_version"] = MODEL_ARCHITECTURE_VERSION
-    elif version is not None:
-        rec["model_architecture_version"] = version
-    rec.update(record or {})
-    with open(directory / "training_config.json", "w") as fh:
-        json.dump(rec, fh)
+    if training_record:
+        rec = {"model": {"norm_method": norm_method}, **(record or {})}
+        with open(directory / "training_config.json", "w") as fh:
+            json.dump(rec, fh)
     return directory / name

@@ -1,4 +1,4 @@
-"""Decoding evaluation (decoding-evaluation capability).
+"""Decoding evaluation.
 
 Scores a decoding configuration on the pinned MERFISH example, from a stored detection hand-off,
 under the seed protocol (seeds 0, 1, 2), and judges changes against a recorded baseline.

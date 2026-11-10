@@ -1,6 +1,6 @@
-"""Pinned SpotNet v1.1 benchmark datasets and store verification.
+"""Pinned SpotNet v1.1 datasets and store verification.
 
-The v1.1 ``.npz`` files are canonical; zarr stores are a verified cache (design D3).
+The v1.1 ``.npz`` files are canonical; zarr stores are a verified cache.
 Conversion (``torch_spots.preprocess``) records the source checksum, version, image count
 and spot count as store attributes. :func:`verify_store` is shared by training and
 evaluation: it checks those attributes against the pinned table below, and also the actual

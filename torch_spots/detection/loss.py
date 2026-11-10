@@ -2,7 +2,6 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 def smooth_l1(y_true, y_pred, sigma=3.0):
@@ -94,8 +93,6 @@ class DotNetLosses(nn.Module):
                  n_classes=2,
                  focal=False,
                  d_pixels=1,
-                 mu=0,
-                 beta=0,
                  regression_weight=1.0,
                  classification_weight=1.0):
         super().__init__()
@@ -109,8 +106,6 @@ class DotNetLosses(nn.Module):
         self.n_classes = n_classes
         self.focal = focal
         self.d_pixels = d_pixels
-        self.mu = mu
-        self.beta = beta
 
     def regression_loss(self, y_true, y_pred):
         """
@@ -173,50 +168,6 @@ class DotNetLosses(nn.Module):
 
         return loss
 
-    def classification_loss_regularized(self, y_true, y_pred):
-        """Regularized classification loss.
-
-        Args:
-            y_true: tensor of size `(batch, 2, Ly, Lx)`, one-hot encoded.
-            y_pred: tensor of size `(batch, 2, Ly, Lx)`, predicted probabilities.
-
-        Returns:
-            float: focal / weighted categorical cross entropy loss.
-        """
-        mu = self.mu
-        beta = self.beta
-
-        if self.focal:
-            loss = weighted_focal_loss(
-                y_true, y_pred, gamma=self.gamma, n_classes=self.n_classes)
-        else:
-            loss = weighted_categorical_crossentropy(
-                y_true, y_pred, n_classes=self.n_classes)
-            loss = loss.mean()
-
-        # L2 penalty on difference in mean spot density per image in the batch
-        # Spot channel is index 1; mean over spatial dims (H, W)
-        N_diff = y_pred[:, 1, :, :].mean(dim=(1, 2)) - y_true[:, 1, :, :].mean(dim=(1, 2))
-        N_loss = (N_diff ** 2).mean()
-
-        # Interaction term: penalizes adjacent positive predictions
-        # Spot channel is index 1, shape: (batch, Ly, Lx)
-        spot_pred = y_pred[:, 1, :, :]
-
-        # Pad H and W dims (last two): (left, right, top, bottom)
-        spot_padded = F.pad(spot_pred, (1, 1, 1, 1))  # (batch, Ly+2, Lx+2)
-
-        inter_loss = (
-            (spot_padded[:, 1:, :] * spot_padded[:, :-1, :]).sum() +
-            (spot_padded[:, :, 1:] * spot_padded[:, :, :-1]).sum()
-        )
-
-        B, _, Ly, Lx = y_pred.shape
-        normalizer = float(B * Ly * Lx)
-        inter_loss = inter_loss / normalizer
-
-        return loss + mu * N_loss + beta * inter_loss
-    
     def combine(self, regression, classification):
         """Weighted sum of the two components, with no division (training.py:111-121)."""
         return self.regression_weight * regression + self.classification_weight * classification
@@ -280,30 +231,4 @@ class LossTracker:
         """Compute and return current loss."""
         avg_loss = self.total_loss / max(self.total_samples, 1)
 
-        return avg_loss 
-    
-
-if __name__ == '__main__':
-
-    print()
-
-    test_class = torch.rand((10, 2, 128, 128))
-    test_reg = torch.rand((10, 2, 128, 128))
-
-    output = {
-        'detections': test_class,
-        'offsets': test_reg
-    }
-
-    true_class = torch.rand((10, 2, 128, 128))
-    true_reg = torch.rand((10, 2, 128, 128))
-
-    labels = {
-        'detections': true_class,
-        'offsets': true_reg
-    }
-
-    loss = DotNetLosses(gamma=3.0, sigma=0.5, focal=False)
-
-    curr_loss = loss(labels, output)
-    print(curr_loss.item())
+        return avg_loss

@@ -1,29 +1,21 @@
-import numpy as np
-import torch
-
-from huggingface_hub import hf_hub_download
-
-from torch_spots.detection.dotnet import (MODEL_ARCHITECTURE_VERSION, IncompatibleCheckpointError,
-                                          load_spotnet)
-from skimage.feature import peak_local_max
-
-import numpy as np
-import glob
-
 from pathlib import Path
 
+import numpy as np
+import torch
+from huggingface_hub import hf_hub_download
+from skimage.feature import peak_local_max
+
+from torch_spots.detection.dotnet import load_spotnet
 from torch_spots.detection.loader import preprocess_image
 from torch_spots.detection.utils import tile_input, untile_output, \
       max_cp_array_to_point_list_max, extract_spots_prob_from_coords_maxpool
 
 
-#: Filename of the default pretrained model on Hugging Face. ``None`` until a model trained on
-#: the current architecture is published (the 2026-07-29 file predates it).
-DEFAULT_PRETRAINED = None
+#: Filename of the default pretrained model in the ``vanvalenlab/torch-spots`` Hugging Face repo.
+DEFAULT_PRETRAINED = 'torch-spots_2026-11-09.pth'
 
 #: Reference operating point. The threshold was chosen once, on the validation split, from the
-#: grid 0.90-0.999 using the three round 6 seeds (``data/eval/round6_threshold_selection.json``,
-#: published-model-reference). The minimum distance and the matching distance follow
+#: grid 0.90-0.999. The minimum distance and the matching distance follow
 #: ``deepcell_spots/applications/spot_detection.py:266-269``. The application's own default is 0.95.
 EVAL_THRESHOLD = 0.993
 EVAL_MIN_DISTANCE = 1
@@ -34,31 +26,31 @@ class SpotDetection():
     def __init__(
             self,
             model_path=None,
-            device=None
+            device=None,
+            norm_method=None,
     ):
-        
-        if device is None:
-            self.device = 'cpu'
-        else:
-            self.device = device
+        """Load a detection model.
+
+        Args:
+            model_path: Path to a SpotNet state dict. ``None`` downloads the default pretrained
+                model (``DEFAULT_PRETRAINED``) to ``~/.deepcell/models``.
+            device: Torch device. Defaults to ``'cpu'``.
+            norm_method: In-model input normalisation the checkpoint was trained with. ``None``
+                (no normalisation) matches the published model; only checkpoints trained with
+                another setting need it.
+        """
+        self.device = 'cpu' if device is None else device
 
         if model_path is None:
-            if DEFAULT_PRETRAINED is None:
-                raise IncompatibleCheckpointError(
-                    "The default pretrained model (torch-spots_2026-07-29.pth) predates the "
-                    "current architecture (version "
-                    f"{MODEL_ARCHITECTURE_VERSION}) and cannot be loaded. Pass a compatible "
-                    "checkpoint with model_path=...; it needs a training_config.json next to it "
-                    "that records the architecture version.")
             local = Path.home() / '.deepcell/models'
-            for name in (DEFAULT_PRETRAINED, 'training_config.json'):
-                hf_hub_download(repo_id='vanvalenlab/torch-spots', filename=name, local_dir=local)
+            hf_hub_download(repo_id='vanvalenlab/torch-spots', filename=DEFAULT_PRETRAINED,
+                            local_dir=local)
             model_path = local / DEFAULT_PRETRAINED
 
         self.model_path = model_path
-        self.model = load_spotnet(self.model_path, device=self.device)
+        self.model = load_spotnet(self.model_path, device=self.device, norm_method=norm_method)
         self.input_shape = 128
-    
+
     def get_spot_probabilities(
             self,
             transforms,
@@ -210,7 +202,7 @@ class SpotDetection():
             min_distance=EVAL_MIN_DISTANCE
     ):
         
-        """Evaluation-path prediction (benchmark-evaluation).
+        """Evaluation-path prediction (used by ``torch_spots.detection.eval``).
 
         Input of X in shape (B, C, H, W), raw images.
         threshold: spot-probability threshold for local maxima (default: the reference threshold, ``EVAL_THRESHOLD``)
@@ -252,8 +244,7 @@ class SpotDetection():
                     each set of points came from)
 
         Returns:
-            (N_total, 2) array of absolute [y, x] points, and a parallel
-            (N_total,) array indicating which tile_idx each point came from
+            (N_total, 2) array of absolute [y, x] points
         """
 
         ## X and Y are swapped in tile info
@@ -261,7 +252,6 @@ class SpotDetection():
         y_offset_all = np.array(tile_info['x_starts']) - tile_info['pad_x'][0]
 
         abs_points = []
-        tile_ids = []
 
         for pts, t_idx in zip(points_per_tile, tile_indices):
             pts = np.asarray(pts, dtype=np.float32)
@@ -271,10 +261,9 @@ class SpotDetection():
             shifted[:, 0] += y_offset_all[t_idx]
             shifted[:, 1] += x_offset_all[t_idx]
             abs_points.append(shifted)
-            tile_ids.append(np.full(pts.shape[0], t_idx))
 
         if not abs_points:
-            return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=int)
+            return np.zeros((0, 2), dtype=np.float32)
 
         return np.vstack(abs_points)
     

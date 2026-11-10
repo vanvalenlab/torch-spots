@@ -1,8 +1,7 @@
 """Reference metric set: the SpotNet (deepcell_spots 0.4.2) point-detection metrics.
 
 These reproduce the definitions the published SpotNet benchmark was computed with, so
-results are comparable with it. They are the only metrics used to judge a benchmark or a
-divergence from the reference configuration. Everything else lives in
+results are comparable with it. They are the metrics reported by evaluation. Everything else lives in
 :mod:`torch_spots.detection.metrics` and is labelled additional.
 
 Citations are ``deepcell_spots/<file>:<line>`` against the vendored 0.4.2 copy.

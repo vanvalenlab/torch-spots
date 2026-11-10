@@ -1,13 +1,12 @@
 """
 PointMetrics
 ============
-ADDITIONAL metrics (not the benchmark metrics). Evaluates a set of inferred
+Additional point metrics. Evaluates a set of inferred
 2-D points against ground truth using optimal bipartite matching (Hungarian
 algorithm) plus a suite of spatial error metrics.
 
-These are diagnostics only. They are never used to judge a benchmark or a
-divergence from the reference configuration; the reference (SpotNet) metric
-set is in ``torch_spots.detection.reference_metrics``. No field name here may
+These are diagnostics only; the reference (SpotNet) metric set, used for
+reported scores, is in ``torch_spots.detection.reference_metrics``. No field name here may
 equal a reference metric name (``reference_metrics.REFERENCE_FIELDS``).
 
 Points are ``[y, x]``.
@@ -403,26 +402,3 @@ class PointMetrics:
             f"PointMetrics(M={len(self.true_pts)} true pts, "
             f"N={len(self.inferred_pts)} inferred pts)"
         )
-
-
-# ---------------------------------------------------------------------------
-# Quick smoke-test
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    rng = np.random.default_rng(0)
-
-    true_pts     = rng.uniform(0, 512, size=(30, 2))
-    inferred_pts = true_pts[:25] + rng.normal(0, 3, size=(25, 2))  # 5 FN, small noise
-
-    pm = PointMetrics(true_pts, inferred_pts)
-    result = pm.evaluate(threshold=5.0)
-    print(result.summary())
-    print()
-
-    # Precision-recall curve across thresholds
-    taus, precs, recs = pm.precision_recall_curve([0.5, 1, 2, 5, 10, 20, 50])
-    print("τ (px)  Precision  Recall    F1")
-    for tau, p, r in zip(taus, precs, recs):
-        f1 = 2*p*r/(p+r) if (p+r) > 0 else 0.0
-        print(f"  {tau:5.1f}   {p:.3f}      {r:.3f}     {f1:.3f}")

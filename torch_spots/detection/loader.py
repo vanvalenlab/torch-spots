@@ -99,7 +99,7 @@ def preprocess_image(x, clip=False):
         clip: if True, first clip each channel to its 0.01st and 99.9th percentiles over
             all of that channel's pixels. This is what the original application does at
             inference (``preprocessing_utils.py:60-61``). Training, validation and
-            benchmark evaluation never use it.
+            evaluation never use it.
     """
     x = np.asarray(x)
     if not np.issubdtype(x.dtype, np.floating):

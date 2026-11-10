@@ -202,10 +202,3 @@ def test_unknown_norm_method_rejected_at_load(tmp_path):
     path.write_text(json.dumps({"model": {"norm_method": "max"}}))
     with pytest.raises(ValueError, match="norm_method"):
         train_mod.load_config(path)
-
-
-def test_version_recorded(tmp_path, pinned_synth):
-    from torch_spots.detection.dotnet import MODEL_ARCHITECTURE_VERSION
-    _stores(tmp_path)
-    rec = json.load(open(f"{train_mod.run_training(_short_cfg(tmp_path))}/training_config.json"))
-    assert rec["model_architecture_version"] == MODEL_ARCHITECTURE_VERSION == 2

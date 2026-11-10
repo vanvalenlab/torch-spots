@@ -11,9 +11,8 @@ import numpy as np
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
-from pathlib import Path
 
-from torch_spots.detection.dotnet import MODEL_ARCHITECTURE_VERSION, SpotNet
+from torch_spots.detection.dotnet import SpotNet
 from torch_spots.detection.loss import DotNetLosses, LossTracker, kernel_l2_penalty
 from torch_spots.detection.loader import spot_dataloader
 from torch_spots.dataset import DEFAULT_DATA_DIR, verify_store
@@ -140,18 +139,18 @@ def train(
     return model, {'best_epoch': best_epoch, 'best_val_objective': best_vloss, 'steps': global_step}
 
 def seed_everything(seed):
-    """Seed Python, NumPy and torch (design D7)."""
+    """Seed Python, NumPy and torch."""
     random.seed(seed)
     np.random.seed(seed % 2**32)
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
 
 
-# Every training setting covered by the detection-training spec lives in this one table
-# (design D1). Runs are compared against it, so a run that changes any value is recorded as
+# The reference training settings (those of the published SpotDetection-8 model). Runs are
+# compared against it, so a run that changes any value is recorded as
 # deviating from the reference in ``training_config.json`` (``non_reference``).
 #
-# Sources, in order of authority (design D1): the published SpotDetection-8 model's saved files,
+# Sources, in order of authority: the published SpotDetection-8 model's saved files,
 # the shipped application's ``model_metadata``, the paper's Methods, then the deepcell_spots 0.4.2
 # code defaults.
 #   augmentation   flip: ``deepcell_spots/training.py:38-42,144-145``; rotation 180 and zoom
@@ -164,7 +163,7 @@ def seed_everything(seed):
 #   model          norm_method None: all five ImageNormalization2D layers saved with null.
 #   epochs         10: the saved optimizer state (0.01 * 0.99**4) shows the shipped weights came from
 #                  epoch 4 of a longer planned run (``model_metadata['n_epochs']`` is 50, never reached);
-#                  3-seed test F1 was 0.8867 at 10 epochs and 0.7607 at 50 (rounds 7 and 6).
+#                  test F1 was 0.8867 at 10 epochs and 0.7607 at 50.
 #                  batch_size 1: application ``model_metadata``.
 REFERENCE_TRAINING = {
     'augmentation': {
@@ -301,7 +300,6 @@ def run_training(config):
     if config['write']:
         with open(model_path + '/' + 'training_config.json', 'w') as file:
             json.dump({**config, 'seed': seed, 'dataset': provenance,
-                       'model_architecture_version': MODEL_ARCHITECTURE_VERSION,
                        'non_reference': non_reference_settings(config)}, file, indent=2)
 
     writer = SummaryWriter(run_info)
@@ -384,7 +382,7 @@ def run_training(config):
                    "--seed, --data-path and --device still apply on top.")
 @click.option('--seed', type=int, default=None,
               help=f"Random seed for initialization, data order and augmentation "
-                   f"[default: {DEFAULT_CONFIG['seed']}]. Benchmark runs use 0, 1 and 2.")
+                   f"[default: {DEFAULT_CONFIG['seed']}].")
 @click.option('--data-path', default=None,
               help="Directory with the converted SpotNet v1.1 train.zarr and val.zarr "
                    f"[default: {DEFAULT_CONFIG['data_path']}].")

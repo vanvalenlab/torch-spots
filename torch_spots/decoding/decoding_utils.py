@@ -1,4 +1,3 @@
-import scipy
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -8,7 +7,6 @@ from pyro.optim import Adam
 from pyro.infer import SVI, TraceEnum_ELBO, config_enumerate
 from pyro import poutine
 from pyro.infer.autoguide import AutoDelta
-from torch.autograd import Function
 
 assert pyro.__version__.startswith('1')
 
@@ -26,40 +24,6 @@ def reshape_torch_array(torch_array):
         torch.tensor: Reshaped array.
     """
     return torch_array.transpose(1, 2).reshape(torch_array.shape[0], -1)
-
-
-class MatrixSquareRoot(Function):
-    """Square root of a positive definite matrix.
-    NOTE: matrix square root is not differentiable for matrices with
-          zero eigenvalues.
-    """
-    @staticmethod
-    def forward(ctx, input):
-        m = input.detach().cpu().numpy().astype(np.float64)
-        sqrtm = torch.from_numpy(scipy.linalg.sqrtm(m).real).to(input)
-        ctx.save_for_backward(sqrtm)
-        return sqrtm
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        grad_input = None
-        if ctx.needs_input_grad[0]:
-            sqrtm, = ctx.saved_tensors
-            sqrtm = sqrtm.data.cpu().numpy().astype(np.float64)
-            gm = grad_output.data.cpu().numpy().astype(np.float64)
-
-            # Given a positive semi-definite matrix X,
-            # since X = X^{1/2}X^{1/2}, we can compute the gradient of the
-            # matrix square root dX^{1/2} by solving the Sylvester equation:
-            # dX = (d(X^{1/2})X^{1/2} + X^{1/2}(dX^{1/2}).
-            grad_sqrtm = scipy.linalg.solve_sylvester(sqrtm, sqrtm, gm)
-
-            grad_input = torch.from_numpy(grad_sqrtm).to(grad_output)
-        return grad_input
-
-mat_sqrt_ = MatrixSquareRoot.apply
-def mat_sqrt(A):
-    return mat_sqrt_(A)
 
 
 def instantiate_rb_params(r, c, codes, params_mode):

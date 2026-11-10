@@ -41,7 +41,7 @@ def convert_to_zarr(filename, out_dir=None):
     version = ds.DATASET_VERSION if (pin is not None and pin["crc32"] == crc) else "unknown"
     if version == "unknown":
         print(f"    WARNING: {split}.npz (CRC-32 {crc}) is not the pinned {ds.DATASET_VERSION} split; "
-              "the store will fail benchmark verification.")
+              "the store will fail verification.")
 
     print(f"    Loading {split}.")
     data = np.load(filename, allow_pickle=True)

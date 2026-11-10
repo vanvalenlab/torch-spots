@@ -81,9 +81,9 @@ python -m torch_spots.detection.train --config ablation.json --seed 0 --device c
 
 The settings you can change are `augmentation` (`flip`, `rotation_range`, `zoom_range`), `loss` (`regression_weight`, `classification_weight`, `focal`), `optimizer` (`lr`, `momentum`, `step_decay`, `epoch_decay`, `kernel_l2`, `grad_clip`), `model` (`norm_method`: `'std'`, `'whole_image'` or `null`), `epochs` and `batch_size`. A misspelled setting name is an error, not silently ignored.
 
-**What gets recorded.** `training_config.json`, saved next to the checkpoint, holds every value used, the seed and the dataset provenance. Its `non_reference` field lists each setting that differs from the defaults above, with its value, so a run with no differences has an empty list. It also records the model settings, a `model_architecture_version` (see *Checkpoint compatibility* below), and `best_epoch` (counted from 0) and `best_val_objective`, which identify the checkpoint saved as `saved_model_best_dict.pth`.
+**What gets recorded.** `training_config.json`, saved next to the checkpoint, holds every value used, the seed and the dataset provenance. Its `non_reference` field lists each setting that differs from the defaults above, with its value, so a run with no differences has an empty list. It also records the model settings and `best_epoch` (counted from 0) and `best_val_objective`, which identify the checkpoint saved as `saved_model_best_dict.pth`.
 
-Checkpoints trained under the earlier defaults (see above) stay loadable, because their `training_config.json` records their settings. They are not reference runs, and their results are not comparable with new ones.
+Checkpoints trained under the earlier defaults (see above) are not reference runs, and their results are not comparable with new ones.
 
 [loss.py](torch_spots/detection/loss.py) defines `DotNetLosses`, which adds the regression and classification terms with the weights above.
 
@@ -107,7 +107,7 @@ The inference pipeline works in five steps.
 4. **Untile**: reassemble the tiled predictions into the original image dimensions. The pipeline tracks each tile's `(x_offset, y_offset)`, so it places spot coordinates correctly in the full image.
 5. **Postprocess**: find local maxima in the spot probability map with `skimage.feature.peak_local_max` (above a `threshold`, at least `min_distance` apart). Then add the predicted `(Δy, Δx)` offset at each peak. This yields sub-pixel coordinates. The implementation was deeply inspired by [PoSTcode](https://github.com/gerstung-lab/postcode).
 
-**Checkpoint compatibility.** Each training run writes `training_config.json` next to its checkpoint, including `model_architecture_version` (currently 2) and the `model` settings used. `SpotDetection(model_path=...)` reads that file, builds the network from the recorded settings, and loads the weights strictly. It stops with an error if the file or the version is missing or different. Checkpoints trained before version 2 (including every earlier benchmark round and the published `torch-spots_2026-07-29.pth`) therefore cannot be loaded by this code. To use one, check out the commit it was trained at. For the same reason `SpotDetection()` with no `model_path` stops with an error until a model trained on the current architecture is published.
+**Loading a model.** `SpotDetection()` downloads the published `torch-spots_2026-11-09.pth` from Hugging Face. `SpotDetection(model_path=...)` loads any SpotNet state dict, with no other files needed. The weights load strictly, so a checkpoint from a different network fails with an error rather than loading partially. A checkpoint trained with in-model normalisation needs `norm_method=` (for example `'std'`); the default `None` matches the published model. The evaluation command takes it as `--norm-method`.
 
 ```python
 from torch_spots.detection.inference import SpotDetection
@@ -117,11 +117,9 @@ points = detector.predict_points(images)                  # images: (B, 1, H, W)
 points = detector.predict_points(images, clip=True)       # with the original application's percentile clip
 ```
 
-### Benchmark evaluation protocol
+### Evaluation
 
-Detection results are scored against the **published SpotDetection-8 model**, run through its own deepcell_spots application and scored by this same pipeline on the same 94 test images. (The F1 = 0.83 figure from earlier versions of this protocol was never found in the paper, and the published model scores far lower at threshold 0.95, so it is no longer the target.) The scoring uses the **reference metric set** ([reference_metrics.py](torch_spots/detection/reference_metrics.py)), which reproduces the deepcell_spots 0.4.2 definitions: mutual-nearest-neighbour matching at τ = 1 px, precision/recall/F1, Jaccard, per-coordinate RMSE and d_md over matched pairs, macro-averaged over all test images. The port's other metrics ([metrics.py](torch_spots/detection/metrics.py)) are *additional* diagnostics and are never used to judge a benchmark or a divergence. The reference operating point is a probability threshold chosen once on the validation split **0.993**, selected on the validation split with the three round 6 seeds (`data/eval/round6_threshold_selection.json`; it is `EVAL_THRESHOLD` in `torch_spots/detection/inference.py`). The old 0.95 is not used, minimum peak distance 1 px, and τ = 1 px.
-
-Benchmark data is **SpotNet v1.1** (`train.npz`, `val.npz`, `test.npz` in `~/.deepcell/spots/`). Training and evaluation both refuse stores that do not match the pinned image count, spot count and checksum.
+Detection is scored on the 94 images of the **SpotNet v1.1** test split (`train.npz`, `val.npz`, `test.npz` in `~/.deepcell/spots/`) with the **reference metric set** ([reference_metrics.py](torch_spots/detection/reference_metrics.py)), which reproduces the deepcell_spots 0.4.2 definitions: mutual-nearest-neighbour matching at τ = 1 px, precision/recall/F1, Jaccard, per-coordinate RMSE and d_md over matched pairs, macro-averaged over all test images. The port's other metrics ([metrics.py](torch_spots/detection/metrics.py)) are reported alongside as additional diagnostics. The default operating point is a probability threshold of **0.993** (chosen on the validation split; `EVAL_THRESHOLD` in [inference.py](torch_spots/detection/inference.py)), a minimum peak distance of 1 px and τ = 1 px. Training and evaluation both refuse stores that do not match the pinned image count, spot count and checksum.
 
 1. **Convert the data** (the `.npz` files are never modified; stores record source checksum, version and counts):
 
@@ -129,47 +127,23 @@ Benchmark data is **SpotNet v1.1** (`train.npz`, `val.npz`, `test.npz` in `~/.de
    python -m torch_spots.preprocess            # or --data-dir PATH
    ```
 
-2. **Train with a seed.** A benchmark configuration is trained with seeds 0, 1 and 2:
+2. **Train** (optional; the seed and dataset provenance are written to `training_config.json` next to the checkpoint):
 
    ```bash
    python -m torch_spots.detection.train --seed 0 --device cuda:0
    ```
 
-   The seed and the dataset provenance are written to `training_config.json` next to the checkpoint.
-
-3. **Evaluate each seed.** This scores all 94 test images and writes a run directory with `per_image.csv` and `summary.json`. Checkpoints without recorded training provenance are marked `unknown_provenance` and are not benchmark-eligible.
+3. **Evaluate.** With no `--model-path` this scores the published pretrained model. It writes a run directory with `per_image.csv` and `summary.json`:
 
    ```bash
+   python -m torch_spots.detection.eval --device cuda:0
    python -m torch_spots.detection.eval --model-path data/model/<run>/saved_model_best_dict.pth \
-       --device cuda:0 --output-dir data/eval/seed0
+       --device cuda:0 --output-dir data/eval/my_run
    ```
 
-   An operating-point sweep (always containing the reference point, reported separately) is available with `python -m torch_spots.detection.eval_sweep`.
+   Add `--norm-method std` (or `whole_image`) for a checkpoint trained with in-model normalisation, and `--split val` to score the pinned validation split (95 images) instead, for example when choosing a threshold without looking at the test set.
 
-   **Scoring the validation split.** Add `--split val` (to `eval` or `eval_sweep`) to score the pinned validation split (95 images) instead. This is how the reference threshold is chosen without looking at the test set. The store is checked against the pinned validation split just as the test store is, the summary records `"split": "val"`, and the result is never benchmark-eligible: `report` refuses it.
-
-   ```bash
-   python -m torch_spots.detection.eval --split val --model-path data/model/<run>/saved_model_best_dict.pth \
-       --device cuda:0 --output-dir data/eval/seed0_val
-   ```
-
-4. **Build the 3-seed report.** This lists per-seed F1, mean and range, and a pass/fail line. The target is **one-sided**: the configuration reproduces the published model when its 3-seed mean F1 is at least the published model's F1 at the same operating point (scoring higher is not a failure). The published model's score is recorded in `torch_spots/detection/report.py` (`PUBLISHED_MODEL_F1`, with its provenance), and the report stops with an error if it has not been recorded. The report refuses runs with unknown provenance, mismatched seeds, a mismatched protocol, an operating point other than the reference, or a validation-split result:
-
-   ```bash
-   python -m torch_spots.detection.report report data/eval/seed0 data/eval/seed1 data/eval/seed2 \
-       --output report.json
-   ```
-
-   **How the published score is measured.** SpotDetection-8 is run through its own deepcell_spots application (default preprocessing) in a separate TensorFlow environment, and its predicted points are written to `points.json`; `python -m torch_spots.detection.report published data/eval/published_spotdetection8/points.json` scores it on the pinned test split at every threshold and writes `summary.json` next to it.
-
-5. **Judge a divergence** from the reference configuration by comparing two reports. An accuracy claim needs the candidate mean F1 to exceed the reference mean by more than the reference seed range. A quality-of-life claim needs a mean F1 no lower than the reference mean minus that range, plus a measured benefit:
-
-   ```bash
-   python -m torch_spots.detection.report compare reference_report.json candidate_report.json \
-       --benefit-metric training_time_reduction --benefit-value 0.30
-   ```
-
-> **Note:** the `eval_results_*.csv` files from earlier versions are superseded. They used Hungarian matching at τ = 2 px, different RMSE/d_md definitions, different input preprocessing and a dataset of unverified version, so they are not comparable with results from this protocol.
+> **Note:** the `eval_results_*.csv` files from earlier versions are superseded. They used Hungarian matching at τ = 2 px, different RMSE/d_md definitions, different input preprocessing and a dataset of unverified version, so they are not comparable with results from this evaluation.
 
 ---
 

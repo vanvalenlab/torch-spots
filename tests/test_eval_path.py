@@ -2,7 +2,6 @@ import numpy as np
 import pytest
 import torch
 
-from torch_spots.detection.dotnet import SpotNet
 from torch_spots.detection.inference import EVAL_MIN_DISTANCE, EVAL_THRESHOLD, SpotDetection
 from torch_spots.detection.loader import SpotDataset, preprocess_image
 from tests.synthetic import write_checkpoint
@@ -97,17 +96,18 @@ def test_all_preprocessing_paths_agree(detector):
         assert np.array_equal(arr, captured["dataset"]), name
 
 
-# ---- loading (detection-model: Inference loads only compatible checkpoints) --------------------
+# ---- loading ----------------------------------------------------------------------------------
 
-def test_compatible_checkpoint_built_from_recorded_settings(tmp_path):
-    path = write_checkpoint(tmp_path, norm_method=None)
+def test_bare_state_dict_loads_with_defaults(tmp_path):
+    path = write_checkpoint(tmp_path, training_record=False)
     det = SpotDetection(model_path=str(path), device="cpu")
     assert det.model.backbone.norm_method is None
 
 
-def test_recorded_normalisation_is_used(tmp_path):
-    path = write_checkpoint(tmp_path, norm_method="std")
-    assert SpotDetection(model_path=str(path), device="cpu").model.backbone.norm_method == "std"
+def test_norm_method_is_passed_to_the_model(tmp_path):
+    path = write_checkpoint(tmp_path, norm_method="std", training_record=False)
+    det = SpotDetection(model_path=str(path), device="cpu", norm_method="std")
+    assert det.model.backbone.norm_method == "std"
 
 
 def test_mismatched_settings_fail_strictly(tmp_path):
@@ -121,12 +121,15 @@ def test_mismatched_settings_fail_strictly(tmp_path):
         SpotDetection(model_path=str(path), device="cpu")
 
 
-def test_outdated_default_model_is_refused_without_downloading(monkeypatch):
+def test_default_model_downloads_only_the_weights(tmp_path, monkeypatch):
     import torch_spots.detection.inference as inf
-    from torch_spots.detection.dotnet import IncompatibleCheckpointError
+    requested = []
 
-    def fail(*a, **k):
-        raise AssertionError("must not download")
-    monkeypatch.setattr(inf, "hf_hub_download", fail)
-    with pytest.raises(IncompatibleCheckpointError, match="predates the current architecture"):
-        SpotDetection()
+    def fake_download(repo_id, filename, local_dir):
+        requested.append(filename)
+        write_checkpoint(local_dir, name=filename, training_record=False)
+    monkeypatch.setattr(inf.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(inf, "hf_hub_download", fake_download)
+    det = SpotDetection()
+    assert requested == [inf.DEFAULT_PRETRAINED]
+    assert det.model_path == tmp_path / ".deepcell/models" / inf.DEFAULT_PRETRAINED
