@@ -1,4 +1,3 @@
-import scipy
 import torch
 import numpy as np
 from tqdm import tqdm
@@ -8,7 +7,6 @@ from pyro.optim import Adam
 from pyro.infer import SVI, TraceEnum_ELBO, config_enumerate
 from pyro import poutine
 from pyro.infer.autoguide import AutoDelta
-from torch.autograd import Function
 
 assert pyro.__version__.startswith('1')
 
@@ -26,74 +24,6 @@ def reshape_torch_array(torch_array):
         torch.tensor: Reshaped array.
     """
     return torch_array.transpose(1, 2).reshape(torch_array.shape[0], -1)
-
-
-def normalize_spot_values(data):
-    """Normalizes spot intensity data array such that log of data has a mean of zero and standard
-    deviation of one.
-    
-    Args:
-        data (torch.tensor): Input data formatted as torch array with shape ``[num_spots, r * c]``.
-    
-    Returns:
-        torch.tensor: Normalized data array.
-    """
-    # TODO: add clipping functionality
-
-    s = torch.tensor(np.percentile(data.cpu().numpy(), 60, axis=0))
-    max_s = torch.tensor(np.percentile(data.cpu().numpy(), 99.9, axis=0))
-    min_s = torch.min(data, dim=0).values
-    eps = 1e-6*max_s
-    log_add = (s ** 2 - max_s * min_s) / (max_s + min_s - 2 * s)
-    log_add = torch.max(-torch.min(data, dim=0).values + eps,
-                        other=log_add.float() + eps)
-    data_log = torch.log10(data + log_add)
-    data_log_mean = data_log.mean(dim=0, keepdim=True)
-    data_log_std = data_log.std(dim=0, keepdim=True)
-    data_norm = (data_log - data_log_mean) / data_log_std  # column-wise normalization
-
-    return data_norm
-
-
-def chol_sigma_from_vec(sigma_vec, dim):
-    L = torch.zeros(dim, dim)
-    L[np.tril_indices(dim)] = sigma_vec
-
-    return torch.mm(L, torch.t(L))
-
-
-class MatrixSquareRoot(Function):
-    """Square root of a positive definite matrix.
-    NOTE: matrix square root is not differentiable for matrices with
-          zero eigenvalues.
-    """
-    @staticmethod
-    def forward(ctx, input):
-        m = input.detach().cpu().numpy().astype(np.float64)
-        sqrtm = torch.from_numpy(scipy.linalg.sqrtm(m).real).to(input)
-        ctx.save_for_backward(sqrtm)
-        return sqrtm
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        grad_input = None
-        if ctx.needs_input_grad[0]:
-            sqrtm, = ctx.saved_tensors
-            sqrtm = sqrtm.data.cpu().numpy().astype(np.float64)
-            gm = grad_output.data.cpu().numpy().astype(np.float64)
-
-            # Given a positive semi-definite matrix X,
-            # since X = X^{1/2}X^{1/2}, we can compute the gradient of the
-            # matrix square root dX^{1/2} by solving the Sylvester equation:
-            # dX = (d(X^{1/2})X^{1/2} + X^{1/2}(dX^{1/2}).
-            grad_sqrtm = scipy.linalg.solve_sylvester(sqrtm, sqrtm, gm)
-
-            grad_input = torch.from_numpy(grad_sqrtm).to(grad_output)
-        return grad_input
-
-mat_sqrt_ = MatrixSquareRoot.apply
-def mat_sqrt(A):
-    return mat_sqrt_(A)
 
 
 def instantiate_rb_params(r, c, codes, params_mode):
@@ -171,7 +101,6 @@ def model_constrained_tensor(
         c,
         r,
         batch_size=None,
-        distribution='Relaxed Bernoulli',
         params_mode='2*R*C'):
     """Model definition: relaxed bernoulli, paramters are shared across all genes, but might
     differ across channels or rounds.
@@ -184,8 +113,8 @@ def model_constrained_tensor(
         r (int): Number of rounds.
         batch_size (int): Size of batch for training.
         params_mode (str): Number of model parameters, whether the parameters are shared across
-            channels or rounds for model of Relaxed Bernoulli distributions, or model of Gaussians.
-            Valid options: `['2', '2*R', '2*C', '2*R*C']`. Defaults to `'2*R*C'`. 
+            channels or rounds. Valid options: `['2', '2*R', '2*C', '2*R*C']`. Defaults to
+            `'2*R*C'`.
 
     Returns:
         None
@@ -205,7 +134,7 @@ def model_constrained_tensor(
             obs=data[batch])
 
 
-def train(svi, num_iter, data, codes, c, r, batch_size, distribution, params_mode):
+def train(svi, num_iter, data, codes, c, r, batch_size, params_mode):
     """Do the training for SVI model.
 
     Args:
@@ -218,8 +147,8 @@ def train(svi, num_iter, data, codes, c, r, batch_size, distribution, params_mod
         r (int): Number of rounds.
         batch_size (int): Size of batch for training.
         params_mode (str): Number of model parameters, whether the parameters are shared across
-            channels or rounds for model of Relaxed Bernoulli distributions, or model of Gaussians.
-            Valid options: `['2', '2*R', '2*C', '2*R*C']`. Defaults to `'2*R*C'`. 
+            channels or rounds. Valid options: `['2', '2*R', '2*C', '2*R*C']`. Defaults to
+            `'2*R*C'`.
 
     Returns:
         list: losses.
@@ -228,7 +157,7 @@ def train(svi, num_iter, data, codes, c, r, batch_size, distribution, params_mod
     pyro.clear_param_store()
     losses = []
     for _ in tqdm(range(num_iter)):
-        loss = svi.step(data, codes, c, r, batch_size, distribution, params_mode)
+        loss = svi.step(data, codes, c, r, batch_size, params_mode)
         losses.append(loss)
     return losses
 
@@ -309,40 +238,29 @@ def decoding_function(spots,
                       barcodes,
                       num_iter=500,
                       batch_size=15000,
-                      set_seed=1,
-                      distribution='Relaxed Bernoulli',
+                      seed=1,
                       params_mode='2*R*C'):
     """Main function for the spot decoding.
 
     Args:
-        spots (numpy.array): Input spot intensity array with shape `[num_spots, c, r]`.
+        spots (numpy.array): Input spot probability array with shape `[num_spots, c, r]`.
         barcodes (numpy.array): Input codebook array with shape `[num_barcodes, c, r]`.
         num_iter (int): Number of iterations for training. Defaults to 500.
         batch_size (int): Size of batch for training. Defaults to 15000.
-        set_seed (int): Seed for randomness. Defaults to 1.
-        distribution (str): Distribution for spot intensities in spot decoding model. Valid options:
-            `['Gaussian', 'Bernoulli', 'Relaxed Bernoulli']`. Defaults to `'Relaxed Bernoulli'`.
+        seed (int): Seed for randomness. It sets which minibatch of spots each training
+            iteration sees. Defaults to 1.
         params_mode (str): Number of model parameters, whether the parameters are shared across
-            channels or rounds for model of Relaxed Bernoulli distributions, or model of Gaussians.
-            Valid options: `['2', '2*R', '2*C', '2*R*C']`. Defaults to `'2*R*C'`. 
+            channels or rounds. Valid options: `['2', '2*R', '2*C', '2*R*C']`. Defaults to
+            `'2*R*C'`.
 
     Raises:
-        ValueError: `distribution` must be one of `['2', '2*R', '2*C', '2*R*C']`.
-        ValueError: `params_mode` must be one of `['Relaxed Bernoulli', 'Bernoulli', 'Gaussian']`.
+        ValueError: `params_mode` must be one of `['2', '2*R', '2*C', '2*R*C']`.
     
     Returns:
         results (dict): The decoding results as a dictionary: `'class_probs'`: posterior
             probabilities for each spot and each gene category; `'params'`: estimated model
             parameters.
     """
-    # if cuda available, runs on gpu
-
-    valid_distributions = ['Relaxed Bernoulli', 'Bernoulli', 'Gaussian']
-    if distribution not in valid_distributions:
-            raise ValueError('Invalid params_mode supplied: {}. '
-                             'Must be one of {}'.format(distribution,
-                                                        valid_distributions))
-
     valid_params_modes = ['2', '2*R', '2*C', '2*R*C']
     if params_mode not in valid_params_modes:
             raise ValueError('Invalid params_mode supplied: {}. '
@@ -362,11 +280,11 @@ def decoding_function(spots,
     optim = Adam({'lr': 0.085, 'betas': [0.85, 0.99]})
     svi = SVI(model_constrained_tensor, auto_guide_constrained_tensor,
               optim, loss=TraceEnum_ELBO(max_plate_nesting=1))
-    pyro.set_rng_seed(set_seed)
+    pyro.set_rng_seed(seed)
 
     print('Training...')
     losses = train(svi, num_iter, data, codes, c, r,
-                   min(num_spots, batch_size), distribution, params_mode)
+                   min(num_spots, batch_size), params_mode)
 
     print('Estimating barcode probabilities...')
     

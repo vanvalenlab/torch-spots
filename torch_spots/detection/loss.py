@@ -2,7 +2,6 @@
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 def smooth_l1(y_true, y_pred, sigma=3.0):
@@ -31,56 +30,59 @@ def smooth_l1(y_true, y_pred, sigma=3.0):
     return regression_loss
 
 
+def class_weights(y_true, n_classes=2):
+    """Per-batch class weights ``T / (n * (c_k + 1))`` used by deepcell's weighted losses.
+
+    ``T`` is the total of the one-hot labels (the number of pixels in the batch), ``n`` the number
+    of classes and ``c_k`` the number of pixels of class ``k``, counted over the whole batch.
+    Source: deepcell-tf 0.12.10 ``deepcell/losses.py`` (``weighted_categorical_crossentropy``,
+    ``weighted_focal_loss``).
+
+    Args:
+        y_true: Tensor of shape ``(B, C, H, W)``, one-hot encoded.
+
+    Returns:
+        Tensor of shape ``(1, C, 1, 1)``.
+    """
+    total = y_true.sum()
+    class_sum = y_true.sum(dim=(0, 2, 3), keepdim=True)  # (1, C, 1, 1)
+    return (1.0 / n_classes) * total / (class_sum + 1.0)
+
+
 def weighted_categorical_crossentropy(y_true, y_pred, n_classes=2, eps=1e-7):
-    """Weighted categorical cross-entropy matching DeepCell's formulation.
+    """Weighted categorical cross-entropy, as in deepcell-tf 0.12.10 ``deepcell/losses.py``.
 
     Args:
         y_true: Tensor of shape `(B, C, H, W)`, one-hot encoded.
-        y_pred: Tensor of shape `(B, C, H, W)`, predicted probabilities.
+        y_pred: Tensor of shape `(B, C, H, W)`, predicted probabilities (a softmax output, so
+            deepcell's re-normalisation over classes is a no-op and is left out).
         n_classes: Number of classes.
-        eps: Small value to avoid log(0).
+        eps: Probability clip, ``K.epsilon()`` in the original.
 
     Returns:
-        Per-pixel weighted loss tensor of shape `(B, H, W)`.
+        Per-pixel weighted loss tensor of shape `(B, H, W)` (summed over the class axis).
     """
     y_pred = torch.clamp(y_pred, eps, 1.0 - eps)
-
-    # Class weights: inverse of class frequency across batch and spatial dims
-    # Sum over (B, H, W), keeping C, shape: (C,)
-    class_counts = y_true.sum(dim=(0, 2, 3)) + eps
-    weights = 1.0 / class_counts
-    weights = weights / weights.sum() * n_classes  # (C,)
-
-    # Broadcast weights over (B, H, W): reshape to (1, C, 1, 1)
-    weights = weights.view(1, -1, 1, 1)
-
-    # Cross-entropy per pixel: sum over C, shape: (B, H, W)
-    ce = -(weights * y_true * torch.log(y_pred)).sum(-1)
-    return ce
+    weights = class_weights(y_true, n_classes)
+    return -(weights * y_true * torch.log(y_pred)).sum(dim=1)
 
 
 def weighted_focal_loss(y_true, y_pred, gamma=2.0, n_classes=2, eps=1e-7):
-    """Weighted focal loss matching DeepCell's formulation.
+    """Weighted focal loss, as in deepcell-tf 0.12.10 ``deepcell/losses.py``.
 
     Args:
         y_true: Tensor of shape `(B, C, H, W)`, one-hot encoded.
         y_pred: Tensor of shape `(B, C, H, W)`, predicted probabilities.
         gamma: Focusing parameter.
         n_classes: Number of classes.
-        eps: Small value to avoid log(0).
+        eps: Probability clip.
 
     Returns:
-        Scalar focal loss.
+        Scalar focal loss (mean over pixels).
     """
     y_pred = torch.clamp(y_pred, eps, 1.0 - eps)
-
-    class_counts = y_true.sum(dim=(0, 2, 3)) + eps
-    weights = 1.0 / class_counts
-    weights = weights / weights.sum() * n_classes  # (C,)
-    weights = weights.view(1, -1, 1, 1)
-
-    focal_weight = (1.0 - y_pred) ** gamma
-    ce = -(weights * focal_weight * y_true * torch.log(y_pred)).sum(dim=1)
+    weights = class_weights(y_true, n_classes)
+    ce = -(weights * (1.0 - y_pred) ** gamma * y_true * torch.log(y_pred)).sum(dim=1)
     return ce.mean()
 
 
@@ -91,16 +93,19 @@ class DotNetLosses(nn.Module):
                  n_classes=2,
                  focal=False,
                  d_pixels=1,
-                 mu=0,
-                 beta=0):
+                 regression_weight=1.0,
+                 classification_weight=1.0):
         super().__init__()
+        self.regression_weight = regression_weight
+        self.classification_weight = classification_weight
+        # Detached values from the most recent forward(), for logging.
+        self.last_regression = None
+        self.last_classification = None
         self.gamma = gamma
         self.sigma = sigma
         self.n_classes = n_classes
         self.focal = focal
         self.d_pixels = d_pixels
-        self.mu = mu
-        self.beta = beta
 
     def regression_loss(self, y_true, y_pred):
         """
@@ -163,63 +168,46 @@ class DotNetLosses(nn.Module):
 
         return loss
 
-    def classification_loss_regularized(self, y_true, y_pred):
-        """Regularized classification loss.
+    def combine(self, regression, classification):
+        """Weighted sum of the two components, with no division (training.py:111-121)."""
+        return self.regression_weight * regression + self.classification_weight * classification
 
-        Args:
-            y_true: tensor of size `(batch, 2, Ly, Lx)`, one-hot encoded.
-            y_pred: tensor of size `(batch, 2, Ly, Lx)`, predicted probabilities.
-
-        Returns:
-            float: focal / weighted categorical cross entropy loss.
-        """
-        mu = self.mu
-        beta = self.beta
-
-        if self.focal:
-            loss = weighted_focal_loss(
-                y_true, y_pred, gamma=self.gamma, n_classes=self.n_classes)
-        else:
-            loss = weighted_categorical_crossentropy(
-                y_true, y_pred, n_classes=self.n_classes)
-            loss = loss.mean()
-
-        # L2 penalty on difference in mean spot density per image in the batch
-        # Spot channel is index 1; mean over spatial dims (H, W)
-        N_diff = y_pred[:, 1, :, :].mean(dim=(1, 2)) - y_true[:, 1, :, :].mean(dim=(1, 2))
-        N_loss = (N_diff ** 2).mean()
-
-        # Interaction term: penalizes adjacent positive predictions
-        # Spot channel is index 1, shape: (batch, Ly, Lx)
-        spot_pred = y_pred[:, 1, :, :]
-
-        # Pad H and W dims (last two): (left, right, top, bottom)
-        spot_padded = F.pad(spot_pred, (1, 1, 1, 1))  # (batch, Ly+2, Lx+2)
-
-        inter_loss = (
-            (spot_padded[:, 1:, :] * spot_padded[:, :-1, :]).sum() +
-            (spot_padded[:, :, 1:] * spot_padded[:, :, :-1]).sum()
-        )
-
-        B, _, Ly, Lx = y_pred.shape
-        normalizer = float(B * Ly * Lx)
-        inter_loss = inter_loss / normalizer
-
-        return loss + mu * N_loss + beta * inter_loss
-    
     def forward(self, outputs, labels):
+        """Return ``regression_weight * reg + classification_weight * cls``.
 
-        class_weight = 5
-        reg_weight = 1
-
+        The two unweighted components are kept on ``last_regression`` / ``last_classification``
+        (as Python floats) so the training log can report them separately.
+        """
         class_loss = self.classification_loss(labels['detections'], outputs['detections'])
-
         reg_loss = self.regression_loss(labels['offsets'], outputs['offsets'])
 
-        loss = (reg_loss*reg_weight + class_loss*class_weight)/(class_weight+reg_weight)
-        
-        return loss
-    
+        self.last_regression = reg_loss.item()
+        self.last_classification = class_loss.item()
+        return self.combine(reg_loss, class_loss)
+
+def penalized_kernels(model):
+    """The weights the original regularizes with ``l2(1e-5)``: every ``Conv2d`` kernel in the
+    backbone (all sub-networks, including each dense convolution) and in the classification head.
+
+    Source: ``deepcell/model_zoo/featurenet.py:152,201`` (``bn_feature_net_skip_2D`` forwards its
+    default ``reg=1e-5`` to ``bn_feature_net_2D``) and ``deepcell_spots/dotnet.py:62,66``. The
+    regression head, biases and BatchNorm parameters have no regularizer.
+    """
+    return [m.weight
+            for part in (model.backbone, model.classification_head)
+            for m in part.modules() if isinstance(m, nn.Conv2d)]
+
+
+def kernel_l2_penalty(model, coeff):
+    """``coeff * sum(w ** 2)`` over :func:`penalized_kernels`.
+
+    Added to the loss as an explicit term, this gives the gradient ``2 * coeff * w`` exactly
+    (PyTorch ``weight_decay`` would give ``coeff * w``) and lets the penalty enter the validation
+    objective, as Keras does through ``model.losses``.
+    """
+    return coeff * sum((k ** 2).sum() for k in penalized_kernels(model))
+
+
 class LossTracker:
     
     def __init__(self):
@@ -243,30 +231,4 @@ class LossTracker:
         """Compute and return current loss."""
         avg_loss = self.total_loss / max(self.total_samples, 1)
 
-        return avg_loss 
-    
-
-if __name__ == '__main__':
-
-    print()
-
-    test_class = torch.rand((10, 2, 128, 128))
-    test_reg = torch.rand((10, 2, 128, 128))
-
-    output = {
-        'detections': test_class,
-        'offsets': test_reg
-    }
-
-    true_class = torch.rand((10, 2, 128, 128))
-    true_reg = torch.rand((10, 2, 128, 128))
-
-    labels = {
-        'detections': true_class,
-        'offsets': true_reg
-    }
-
-    loss = DotNetLosses(gamma=3.0, sigma=0.5, focal=False)
-
-    curr_loss = loss(labels, output)
-    print(curr_loss.item())
+        return avg_loss

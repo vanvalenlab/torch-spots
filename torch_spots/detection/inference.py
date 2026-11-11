@@ -1,18 +1,24 @@
-import numpy as np
-import torch
-
-from huggingface_hub import hf_hub_download
-
-from torch_spots.detection.dotnet import SpotNet
-from skimage.feature import peak_local_max
-
-import numpy as np
-import glob
-
 from pathlib import Path
 
-from torch_spots.detection.utils import spotnet_preprocess, tile_input, untile_output, \
+import numpy as np
+import torch
+from huggingface_hub import hf_hub_download
+from skimage.feature import peak_local_max
+
+from torch_spots.detection.dotnet import load_spotnet
+from torch_spots.detection.loader import preprocess_image
+from torch_spots.detection.utils import tile_input, untile_output, \
       max_cp_array_to_point_list_max, extract_spots_prob_from_coords_maxpool
+
+
+#: Filename of the default pretrained model in the ``vanvalenlab/torch-spots`` Hugging Face repo.
+DEFAULT_PRETRAINED = 'torch-spots_2026-11-09.pth'
+
+#: Reference operating point. The threshold was chosen once, on the validation split, from the
+#: grid 0.90-0.999. The minimum distance and the matching distance follow
+#: ``deepcell_spots/applications/spot_detection.py:266-269``. The application's own default is 0.95.
+EVAL_THRESHOLD = 0.993
+EVAL_MIN_DISTANCE = 1
 
 
 class SpotDetection():
@@ -20,47 +26,77 @@ class SpotDetection():
     def __init__(
             self,
             model_path=None,
-            device=None
+            device=None,
+            norm_method=None,
     ):
-        
-        self.model = SpotNet()
+        """Load a detection model.
 
-        if device is None:
-            self.device = 'cpu'
-        else:
-            self.device = device
+        Args:
+            model_path: Path to a SpotNet state dict. ``None`` downloads the default pretrained
+                model (``DEFAULT_PRETRAINED``) to ``~/.deepcell/models``.
+            device: Torch device. Defaults to ``'cpu'``.
+            norm_method: In-model input normalisation the checkpoint was trained with. ``None``
+                (no normalisation) matches the published model; only checkpoints trained with
+                another setting need it.
+        """
+        self.device = 'cpu' if device is None else device
 
         if model_path is None:
-            
-            hf_hub_download(repo_id='vanvalenlab/torch-spots', 
-                            filename='torch-spots_2026-07-29.pth',
-                            local_dir=Path.home() / '.deepcell/models')
-            model_path = Path.home() / '.deepcell/models/torch-spots_2026-07-29.pth'
-            
+            local = Path.home() / '.deepcell/models'
+            hf_hub_download(repo_id='vanvalenlab/torch-spots', filename=DEFAULT_PRETRAINED,
+                            local_dir=local)
+            model_path = local / DEFAULT_PRETRAINED
+
         self.model_path = model_path
-        
-        checkpoint = torch.load(self.model_path, map_location=self.device)
-        self.model.load_state_dict(checkpoint)
-        self.model = self.model.eval().to(self.device)
+        self.model = load_spotnet(self.model_path, device=self.device, norm_method=norm_method)
         self.input_shape = 128
-    
-    def get_spot_intensities(
+
+    def get_spot_probabilities(
             self,
             transforms,
             threshold=0.9,
             min_distance=1,
-            extra_pixel_num=0
+            pool_size=0
     ):
-        
-        spot_probs = transforms['detections'][:, 1:2] # Shape R, C, H, W
-        prob_mips = np.max(spot_probs, axis=0) # Shape C, H, W
-        
-        point_coord = max_cp_array_to_point_list_max(prob_mips, threshold=threshold, min_distance=min_distance)
+        """Hand the detection output for one field of view to the decoding module.
 
-        intensities = extract_spots_prob_from_coords_maxpool(spot_probs, point_coord, extra_pixel_num=extra_pixel_num)        
-        intensities = np.concatenate(intensities, axis=1)
+        Candidate locations are the local maxima of the pixel-wise maximum, over all N images,
+        of the spot-class probability. The probability of each image is then read at every
+        candidate.
 
-        return intensities, point_coord
+        Args:
+            transforms (dict): Output of ``predict_transforms`` for the N images of the stack, in
+                the codebook's column order. Only the spot-class probability (channel 1 of
+                ``transforms['detections']``) is used.
+            threshold (float): Candidate threshold: peaks of the projection above it are kept.
+                Independent of the evaluation threshold (``EVAL_THRESHOLD``). Defaults to 0.9.
+            min_distance (int): Minimum separation between candidates, in pixels. Defaults to 1.
+            pool_size (int): Take the maximum over the ``(2 * pool_size + 1) ** 2`` window around
+                each candidate instead of the pixel itself. Defaults to 0.
+
+        Returns:
+            dict: ``'locations'``, integer ``[y, x]`` (row, column) of shape ``[n, 2]``;
+            ``'probabilities'``, spot probabilities in [0, 1] of shape ``[n, N]``, column *i*
+            from image *i*; ``'settings'``, the threshold, min_distance and pool_size used.
+        """
+
+        spot_probs = transforms['detections'][:, 1:2] # Shape N, 1, H, W
+        prob_mips = np.max(spot_probs, axis=0) # Shape 1, H, W
+
+        locations = max_cp_array_to_point_list_max(prob_mips, threshold=threshold, min_distance=min_distance)
+
+        probabilities = extract_spots_prob_from_coords_maxpool(spot_probs, locations, pool_size=pool_size)
+        probabilities = np.concatenate(probabilities, axis=1)
+
+        return {
+            'locations': locations,
+            'probabilities': probabilities,
+            'settings': {
+                'threshold': threshold,
+                'min_distance': min_distance,
+                'pool_size': pool_size,
+            },
+        }
 
 
     def _y_annotations_to_point_list_max(self, y_pred, threshold=0.95, min_distance=2):
@@ -105,14 +141,29 @@ class SpotDetection():
 
         return np.vstack(dot_centers)
     
+    @staticmethod
+    def _preprocess(X, clip=False):
+        """Preprocess each full (C, H, W) image of a (B, C, H, W) batch, before tiling."""
+        X = np.asarray(X)
+        if X.ndim != 4:
+            raise ValueError(f"Image data must be 4D (B, C, H, W), got shape {X.shape}")
+        return np.stack([preprocess_image(img, clip=clip) for img in X]).astype(np.float32)
+
     def predict_transforms(
             self,
             X,
             batch_size=20,
+            clip=False,
         ):
-        
+        """Input X of shape (B, C, H, W), raw images.
+
+        Each image is preprocessed with ``preprocess_image`` (min-max scaling, the same
+        transform training uses) before it is tiled. ``clip=True`` first clips each image
+        and channel to its 0.01st and 99.9th percentiles, as the original application does.
+        """
+
         # Preprocess
-        X = spotnet_preprocess(X)
+        X = self._preprocess(X, clip=clip)
         tiles, tile_info = tile_input(X, (self.input_shape,self.input_shape))
 
         # Send data to device
@@ -147,20 +198,25 @@ class SpotDetection():
     def _eval_predict(
             self,
             X,
-            threshold=0.99,
-            min_distance=1
+            threshold=EVAL_THRESHOLD,
+            min_distance=EVAL_MIN_DISTANCE
     ):
         
-        """Input of X in shape (B, 1, H, W)
-        threshold of finding local maxima
-        min distance between the points predicted
+        """Evaluation-path prediction (used by ``torch_spots.detection.eval``).
+
+        Input of X in shape (B, C, H, W), raw images.
+        threshold: spot-probability threshold for local maxima (default: the reference threshold, ``EVAL_THRESHOLD``)
+        min_distance: minimum distance between predicted peaks (default: reference 1 px)
+
+        Images are preprocessed per image with ``preprocess_image``, the same function the
+        training dataset uses, so evaluation sees exactly what training saw.
         """
 
-        # Preprocess
-        X = spotnet_preprocess(X)
+        # Preprocess exactly like the training data path
+        X = self._preprocess(X)
 
         # Send data to device
-        X = torch.tensor(X, device=self.device)
+        X = torch.tensor(X, device=self.device, dtype=torch.float32)
 
         # Infer
         with torch.inference_mode():
@@ -188,8 +244,7 @@ class SpotDetection():
                     each set of points came from)
 
         Returns:
-            (N_total, 2) array of absolute [y, x] points, and a parallel
-            (N_total,) array indicating which tile_idx each point came from
+            (N_total, 2) array of absolute [y, x] points
         """
 
         ## X and Y are swapped in tile info
@@ -197,7 +252,6 @@ class SpotDetection():
         y_offset_all = np.array(tile_info['x_starts']) - tile_info['pad_x'][0]
 
         abs_points = []
-        tile_ids = []
 
         for pts, t_idx in zip(points_per_tile, tile_indices):
             pts = np.asarray(pts, dtype=np.float32)
@@ -207,10 +261,9 @@ class SpotDetection():
             shifted[:, 0] += y_offset_all[t_idx]
             shifted[:, 1] += x_offset_all[t_idx]
             abs_points.append(shifted)
-            tile_ids.append(np.full(pts.shape[0], t_idx))
 
         if not abs_points:
-            return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=int)
+            return np.zeros((0, 2), dtype=np.float32)
 
         return np.vstack(abs_points)
     
@@ -220,15 +273,18 @@ class SpotDetection():
             threshold=0.99,
             min_distance=1,
             batch_size=20,
+            clip=False,
     ):
         
         """Input of X in shape (B, 1, H, W)
         threshold of finding local maxima
         min distance between the points predicted
+        clip: clip each image to its 0.01/99.9 percentiles before scaling (the original
+            application's behaviour). Off by default, so inference matches training.
         """
 
         # Preprocess
-        X = spotnet_preprocess(X)
+        X = self._preprocess(X, clip=clip)
         tiles, tile_info = tile_input(X, (self.input_shape, self.input_shape))
 
         X = torch.tensor(tiles, device=self.device)

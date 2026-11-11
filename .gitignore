@@ -9,3 +9,8 @@ SpotNetExampleData-v1_0/
 *.csv
 *.egg-info
 build/
+
+.pytest_cache/
+deepcell_spots/
+.claude/
+AGENTS.md

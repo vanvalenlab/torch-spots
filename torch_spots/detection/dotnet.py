@@ -1,8 +1,10 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from torch_spots.detection.modules import BNFeatureNetSkip2D
+from torch_spots.detection.modules import BNFeatureNetSkip2D, _bn
 
 
 # ---------------------------------------------------------------------------
@@ -39,7 +41,7 @@ class ClassificationHead(nn.Module):
             # TensorProduct(n_dense_filters)  → BN → ReLU
             # (B, 128, H, W)  →  (B, 128, H, W)
             nn.Conv2d(in_channels, n_dense_filters, kernel_size=1, bias=False),
-            nn.BatchNorm2d(n_dense_filters),
+            _bn(n_dense_filters),
             nn.ReLU(inplace=True),
 
             # TensorProduct(n_features)
@@ -113,6 +115,64 @@ class OffsetRegressionHead(nn.Module):
 
 
 # ---------------------------------------------------------------------------
+# Checkpoint loading
+# ---------------------------------------------------------------------------
+
+def load_spotnet(checkpoint_path, device='cpu', **model_kwargs) -> 'SpotNet':
+    """Build a SpotNet and load a saved state dict into it.
+
+    ``model_kwargs`` are passed to :class:`SpotNet`; the defaults build the published model.
+    Weights load strictly, so a checkpoint whose parameters do not match the network fails.
+    """
+    model = SpotNet(**model_kwargs)
+    state = torch.load(checkpoint_path, map_location=device)
+    model.load_state_dict(state, strict=True)
+    return model.eval().to(device)
+
+
+# ---------------------------------------------------------------------------
+# Weight initialisation
+# ---------------------------------------------------------------------------
+
+# Standard deviation of a unit normal truncated at +/- 2 sigma.  Keras divides
+# by this so the truncated distribution ends up with the intended std.
+_TRUNC2_STD = 0.87962566103423978
+
+
+def init_reference_weights(model: nn.Module) -> None:
+    """Initialise a SpotNet the way deepcell_spots 0.4.2 does.
+
+    * Backbone and classification-head kernels: Keras ``he_normal`` -- a normal
+      distribution cut off at 2 standard deviations, scaled so that its
+      standard deviation is sqrt(2 / fan_in).
+    * Regression-head kernels: normal with std 0.01.
+    * Every bias: 0.  BatchNorm scale 1 and shift 0.
+
+    Sources: ``deepcell/model_zoo/featurenet.py:58,150,199`` and
+    ``deepcell_spots/dotnet.py:39,61,65,89-90``.
+    """
+    def he_normal(conv: nn.Conv2d) -> None:
+        fan_in = conv.in_channels * conv.kernel_size[0] * conv.kernel_size[1]
+        s = math.sqrt(2.0 / fan_in) / _TRUNC2_STD
+        nn.init.trunc_normal_(conv.weight, mean=0.0, std=s, a=-2 * s, b=2 * s)
+
+    for part in (model.backbone, model.classification_head):
+        for m in part.modules():
+            if isinstance(m, nn.Conv2d):
+                he_normal(m)
+    for m in model.offset_regression_head.modules():
+        if isinstance(m, nn.Conv2d):
+            nn.init.normal_(m.weight, mean=0.0, std=0.01)
+
+    for m in model.modules():
+        if isinstance(m, nn.Conv2d) and m.bias is not None:
+            nn.init.zeros_(m.bias)
+        elif isinstance(m, nn.BatchNorm2d):
+            nn.init.ones_(m.weight)
+            nn.init.zeros_(m.bias)
+
+
+# ---------------------------------------------------------------------------
 # SpotNet  –  full model
 # ---------------------------------------------------------------------------
 
@@ -158,7 +218,8 @@ class SpotNet(nn.Module):
                                        Default 2 (background / spot).
         regression_feature_size(int):  Hidden channels in regression head.
                                        Default 256.
-        norm_method            (str):  Input normalisation.  Default 'std'.
+        norm_method            (str):  Input normalisation: None (default, as in the
+                                       published model), 'std' or 'whole_image'.
     """
 
     def __init__(self,
@@ -202,6 +263,8 @@ class SpotNet(nn.Module):
             regression_feature_size = regression_feature_size,
         )
 
+        init_reference_weights(self)
+
     def forward(self, x: torch.Tensor):
         """Full forward pass.
 
@@ -240,181 +303,3 @@ class SpotNet(nn.Module):
             'detections':    classification,    # (B, 2, H, W)
             'offsets': offset_regression, # (B, 2, H, W)
         }
-
-
-# ===========================================================================
-# Smoke tests
-# ===========================================================================
-
-if __name__ == '__main__':
-    import sys
-
-    device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    print(f'Running spotnet.py tests on: {device}\n')
-
-    B, C, H, W = 2, 1, 64, 64   # 64×64 keeps memory low; model is fully-conv so any size works
-
-    # ------------------------------------------------------------------
-    # Test 1: ClassificationHead
-    # ------------------------------------------------------------------
-    print('=' * 60)
-    print('Test 1: ClassificationHead')
-    print('=' * 60)
-    cls_head = ClassificationHead(in_channels=128, n_dense_filters=128,
-                                  n_features=2).to(device)
-    feat = torch.randn(B, 128, H, W, device=device)
-    print(f'  Input  shape : {tuple(feat.shape)}')
-    with torch.no_grad():
-        cls_out = cls_head(feat)
-    print(f'  Output shape : {tuple(cls_out.shape)}')
-    assert cls_out.shape == (B, 2, H, W)
-    # Softmax: probabilities sum to 1 over channel dim
-    prob_sum = cls_out.sum(dim=1)
-    assert torch.allclose(prob_sum, torch.ones_like(prob_sum), atol=1e-5), \
-        'Softmax probabilities do not sum to 1'
-    print('  Softmax sums  : all close to 1.0 ✓')
-    print('  PASSED ✓\n')
-
-    # ------------------------------------------------------------------
-    # Test 2: OffsetRegressionHead
-    # ------------------------------------------------------------------
-    print('=' * 60)
-    print('Test 2: OffsetRegressionHead')
-    print('=' * 60)
-    reg_head = OffsetRegressionHead(in_channels=128,
-                                    regression_feature_size=256).to(device)
-    print(f'  Input  shape : {tuple(feat.shape)}')
-    with torch.no_grad():
-        reg_out = reg_head(feat)
-    print(f'  Output shape : {tuple(reg_out.shape)}')
-    assert reg_out.shape == (B, 2, H, W)
-    print('  PASSED ✓\n')
-
-    # ------------------------------------------------------------------
-    # Test 3: Full SpotNet – default config
-    # ------------------------------------------------------------------
-    print('=' * 60)
-    print('Test 3: SpotNet – default config (256×256, 1-channel input)')
-    print('=' * 60)
-    model = SpotNet(
-        input_channels          = C,
-        receptive_field         = 13,
-        n_skips                 = 3,
-        n_conv_filters          = 32,
-        n_dense_filters         = 128,
-        num_classes             = 2,
-        regression_feature_size = 256,
-    ).to(device)
-
-    x = torch.randn(B, C, H, W, device=device)
-    print(f'  Input  shape : {tuple(x.shape)}')
-    with torch.no_grad():
-        out = model(x)
-
-    cls = out['detections']
-    reg = out['offsets']
-    print(f'  detections    shape : {tuple(cls.shape)}')
-    print(f'  offsets shape : {tuple(reg.shape)}')
-    assert cls.shape == (B, 2, H, W)
-    assert reg.shape == (B, 2, H, W)
-    print('  PASSED ✓\n')
-
-    # ------------------------------------------------------------------
-    # Test 4: Spatial size preservation
-    # ------------------------------------------------------------------
-    print('=' * 60)
-    print('Test 4: Spatial size preservation')
-    print('=' * 60)
-    for h, w in [(32, 32), (128, 128)]:
-        x_sz = torch.randn(1, C, h, w, device=device)
-        with torch.no_grad():
-            out_sz = model(x_sz)
-        cls_sz = out_sz['detections']
-        reg_sz = out_sz['offsets']
-        print(f'  Input ({h}×{w}):  cls {tuple(cls_sz.shape)},  '
-              f'reg {tuple(reg_sz.shape)}')
-        assert cls_sz.shape == (1, 2, h, w)
-        assert reg_sz.shape == (1, 2, h, w)
-    print('  PASSED ✓\n')
-
-    # ------------------------------------------------------------------
-    # Test 5: Multi-channel input (e.g. 3-channel fluorescence)
-    # ------------------------------------------------------------------
-    print('=' * 60)
-    print('Test 5: Multi-channel input (C=3)')
-    print('=' * 60)
-    model_mc = SpotNet(input_channels=3).to(device)
-    x_mc = torch.randn(B, 3, H, W, device=device)
-    print(f'  Input  shape : {tuple(x_mc.shape)}')
-    with torch.no_grad():
-        out_mc = model_mc(x_mc)
-    assert out_mc['detections'].shape    == (B, 2, H, W)
-    assert out_mc['offsets'].shape == (B, 2, H, W)
-    print(f'  detections    shape : {tuple(out_mc["detections"].shape)}')
-    print(f'  offsets shape : {tuple(out_mc["offsets"].shape)}')
-    print('  PASSED ✓\n')
-
-    # ------------------------------------------------------------------
-    # Test 6: Output value ranges
-    # ------------------------------------------------------------------
-    print('=' * 60)
-    print('Test 6: Output value ranges')
-    print('=' * 60)
-    with torch.no_grad():
-        out6 = model(torch.randn(B, C, H, W, device=device))
-    cls6 = out6['detections']
-    reg6 = out6['offsets']
-    assert cls6.min() >= 0.0 and cls6.max() <= 1.0, \
-        'detections output outside [0, 1]'
-    print(f'  detections  range : [{cls6.min():.4f}, {cls6.max():.4f}]  '
-          f'(expected [0, 1]) ✓')
-    print(f'  offsets range: [{reg6.min():.4f}, {reg6.max():.4f}]  '
-          f'(unbounded floats, no constraint) ✓')
-    print('  PASSED ✓\n')
-
-    # ------------------------------------------------------------------
-    # Test 7: Backward pass (gradient flow)
-    # ------------------------------------------------------------------
-    print('=' * 60)
-    print('Test 7: Backward pass (gradient flow)')
-    print('=' * 60)
-    model_grad = SpotNet(
-        input_channels  = C,
-        receptive_field = 13,
-        n_skips         = 3,
-        n_conv_filters  = 32,
-        n_dense_filters = 128,
-    ).to(device)
-    x_grad = torch.randn(B, C, H, W, device=device)
-    out_grad = model_grad(x_grad)
-    # Combine both heads into a scalar loss
-    loss = out_grad['detections'].sum() + out_grad['offsets'].sum()
-    loss.backward()
-    # Verify that all parameters received a gradient
-    no_grad = [n for n, p in model_grad.named_parameters()
-               if p.requires_grad and p.grad is None]
-    assert not no_grad, f'Parameters with no gradient: {no_grad}'
-    print('  All parameters received gradients ✓')
-    print('  PASSED ✓\n')
-
-    # ------------------------------------------------------------------
-    # Test 8: Parameter count
-    # ------------------------------------------------------------------
-    print('=' * 60)
-    print('Test 8: Parameter counts')
-    print('=' * 60)
-    def count_params(m):
-        return sum(p.numel() for p in m.parameters() if p.requires_grad)
-
-    total      = count_params(model)
-    backbone   = count_params(model.backbone)
-    cls_params = count_params(model.classification_head)
-    reg_params = count_params(model.offset_regression_head)
-    print(f'  Backbone                : {backbone:>10,}')
-    print(f'  ClassificationHead      : {cls_params:>10,}')
-    print(f'  OffsetRegressionHead    : {reg_params:>10,}')
-    print(f'  Total                   : {total:>10,}')
-    print()
-
-    print('All spotnet.py tests passed.')
-    sys.exit(0)

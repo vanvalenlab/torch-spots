@@ -1,4 +1,6 @@
 """Spot detection image datasets and DataLoaders (PyTorch)"""
+import random
+
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
@@ -82,6 +84,38 @@ def subpixel_distance_transform(point_list, image_shape, dy=1, dx=1):
     return delta_y.astype(np.float32), delta_x.astype(np.float32), nearest_point
 
 
+def preprocess_image(x, clip=False):
+    """The one image preprocessing used by training, evaluation and inference.
+
+    Min-max scales each channel of a (C, H, W) image to [0, 1]. There is no offset. A
+    channel with no range (every pixel equal) maps to 0 instead of dividing 0 by 0.
+
+    On SpotNet v1.1 every stored image already spans exactly [0, 1], so by default this
+    returns the stored image unchanged, which is what the original trained on
+    (``deepcell_spots/training.py:89-90``; ``deepcell_spots/utils/preprocessing_utils.py:56-67``).
+
+    Args:
+        x: (C, H, W) image.
+        clip: if True, first clip each channel to its 0.01st and 99.9th percentiles over
+            all of that channel's pixels. This is what the original application does at
+            inference (``preprocessing_utils.py:60-61``). Training, validation and
+            evaluation never use it.
+    """
+    x = np.asarray(x)
+    if not np.issubdtype(x.dtype, np.floating):
+        x = x.astype(np.float64)
+    out = np.empty_like(x)
+    for c in range(x.shape[0]):
+        ch = x[c]
+        if clip:
+            lo, hi = np.percentile(ch, (0.01, 99.9))
+            ch = np.clip(ch, lo, hi)
+        lo, hi = ch.min(), ch.max()
+        span = hi - lo
+        out[c] = (ch - lo) / span if span > 0 else 0
+    return out
+
+
 class SpotDataset(Dataset):
     """PyTorch Dataset for fully-convolutional spot detection.
 
@@ -131,6 +165,7 @@ class SpotDataset(Dataset):
                  y_inds,
                  normalize=True,
                  augment=True,
+                 augmentation=None,
                  image_shape = (128,128)):
 
 
@@ -139,8 +174,9 @@ class SpotDataset(Dataset):
         self.y_inds = y_inds
         self.image_shape = image_shape
 
-        # Augmentation parameters
-        self.transform = SpotAugmentation()
+        # Augmentation settings (flip / rotation_range / zoom_range); see SpotAugmentation.
+        # Only used when ``augment`` is True, so validation data is never augmented.
+        self.transform = SpotAugmentation(image_shape=image_shape, **(augmentation or {}))
 
         self.normalize = normalize
         self.augment = augment
@@ -151,26 +187,9 @@ class SpotDataset(Dataset):
     # Internal helpers
     # ------------------------------------------------------------------
 
-    def _minmax(self,x):
-
-        xmin = np.min(x)
-        xmax = np.max(x)
-        x = (x - xmin) / (xmax - xmin)
-
-        return x
-    
-    def _perc_clip(self, x):
-
-        p1, p99 = np.percentile(x, (0.1, 99.9))
-        return np.clip(x, p1, p99)
-
     def _standardize(self, x):
-        """Apply percentile clipping, min-max normalization, then subtraction at 0.5."""
-        x = self._perc_clip(x)
-        x = self._minmax(x)
-        x = x - 0.5
-
-        return x
+        """Apply the shared training preprocessing (see :func:`preprocess_image`)."""
+        return preprocess_image(x)
 
     # ------------------------------------------------------------------
     # Dataset interface
@@ -216,13 +235,27 @@ class SpotDataset(Dataset):
         return x, {'detections': det_t, 'offsets': off_t}
 
 
+def seed_worker(worker_id):
+    """``worker_init_fn``: derive each worker's NumPy/Python seed from its torch seed.
+
+    Augmentation draws from NumPy's global RNG inside workers, so each worker needs a
+    seed that is a deterministic function of the DataLoader's generator.
+    """
+    seed = torch.initial_seed() % 2**32
+    np.random.seed(seed)
+    random.seed(seed)
+
+
 def spot_dataloader(X,
                     y,
                     y_inds,
                     batch_size=1,
                     shuffle=True,
                     num_workers=0,
-                    augment=True):
+                    augment=True,
+                    augmentation=None,
+                    drop_last=False,
+                    seed=None):
     """Build a :class:`torch.utils.data.DataLoader` for spot detection.
 
     This is a convenience wrapper that constructs a :class:`SpotDataset` and
@@ -234,9 +267,14 @@ def spot_dataloader(X,
             and ``'y'`` object array of (n_spots, 2) point arrays.
         batch_size (int): Number of samples per batch.
         shuffle (bool): Whether to shuffle the data each epoch.
-        seed (int | None): Random seed for the dataset RNG.
+        seed (int | None): If given, a seeded ``torch.Generator`` drives shuffling and
+            ``seed_worker`` seeds each worker's NumPy RNG (used by augmentation).
         num_workers (int): Number of subprocesses for data loading.
             ``0`` means data is loaded in the main process.
+        drop_last (bool): Drop a final batch smaller than ``batch_size``.
+        augment (bool): Apply random augmentation (False for validation).
+        augmentation (dict | None): Keyword settings for ``SpotAugmentation``
+            (``flip``, ``rotation_range``, ``zoom_range``). ``None`` uses its defaults (flips, rotation +-180, zoom 0.8-1.2).
         rotation_range (float): See :class:`SpotDataset`.
         width_shift_range (float): See :class:`SpotDataset`.
         height_shift_range (float): See :class:`SpotDataset`.
@@ -279,10 +317,19 @@ def spot_dataloader(X,
         X,
         y,
         y_inds,
-        augment=augment)
+        augment=augment,
+        augmentation=augmentation)
+
+    generator = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
 
     return DataLoader(
         dataset,
         batch_size=batch_size,
         shuffle=shuffle,
-        num_workers=num_workers)
+        drop_last=drop_last,
+        num_workers=num_workers,
+        generator=generator,
+        worker_init_fn=seed_worker if seed is not None else None)
