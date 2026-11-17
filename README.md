@@ -149,9 +149,9 @@ Candidates are local maxima of the highest probability across all images, so a s
 
 ## Hugging Face access
 
-The pretrained model weights are private to the Van Valen Lab Hugging Face organization.
+The pretrained model weights are available to use, but you need a Hugging Face account in order to access them. Requests are approved automatically.
 
-1. Create a free Hugging Face account and join the [vanvalenlab organization](https://huggingface.co/vanvalenlab). You are added as a "Read" member.
+1. Create a free Hugging Face account.
 2. Generate an [access token](https://huggingface.co/settings/tokens) and export it as `HF_TOKEN`. The weights download automatically the first time you create a `SpotDetection`.
 
 ## Troubleshooting
